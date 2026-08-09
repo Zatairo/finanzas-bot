@@ -88,20 +88,15 @@ def fila_activa(row):
 
 CABECERA = ["id", "fecha", "hora", "grupo", "usuario", "tipo", "monto", "moneda",
             "categoria", "subcategoria", "descripcion_orig", "descripcion_norm",
-            "metodo", "evidencia", "estado", "prioridad",
-            "monto_total", "monto_usuario", "participantes", "reparto"]
+            "metodo", "evidencia", "estado", "prioridad"]
 
 
 def build_row(data):
-    """Construye la fila (20 col). data = dict."""
+    """Construye la fila (16 col), igual que la hoja actual. data = dict."""
     d = data
     monto = d.get("monto_display") or ""
     return [d.get("id", ""), d.get("fecha", ""), d.get("hora", ""),
             d.get("grupo", ""), d.get("usuario", ""), d.get("tipo", "Gasto"),
             monto, d.get("moneda", "COP"), d.get("categoria", ""),
             d.get("subcategoria", ""), d.get("desc", ""), d.get("desc", ""),
-            d.get("metodo", ""), d.get("evidencia", ""), "aprobado", "alta",
-            d.get("monto_total", "") or monto,
-            d.get("monto_usuario", "") or monto,
-            ",".join(d.get("participantes", []) or []),
-            d.get("reparto", "")]
+            d.get("metodo", ""), d.get("evidencia", ""), "aprobado", "alta"]

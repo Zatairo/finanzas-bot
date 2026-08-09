@@ -171,10 +171,19 @@ def test_compartido_hogar(motor):
     r = m.procesar("hogar", "3002084572", "compramos 80 mil de mercado a medias",
                    dry_run=True)
     s = _unpack(r)
+    assert "monto': '$80,000'" in s
     assert "monto_num': 80000" in s
     assert "compartido': True" in s
-    assert "U1" in s and "U2" in s
-    assert "monto_usuario': '$40,000'" in s  # cada uno
+    assert "usuario': 'U3'" in s  # U3 = mitad (etiqueta del gasto compartido)
+    assert "categoria': 'Alimentacion'" in s
+    # registro real guarda monto completo con usuario U3 y 16 columnas
+    r2 = m.procesar("hogar", "3002084572", "compramos 80 mil de mercado a medias",
+                    dry_run=False)
+    assert "U3" in _unpack(r2)
+    last = srv.rows[-1]
+    assert last[4] == "U3"          # col usuario
+    assert last[6] == "$80,000"     # col monto completo
+    assert len(last) == 16          # sin columnas extra de reparto
 
 
 # ==========================================================================

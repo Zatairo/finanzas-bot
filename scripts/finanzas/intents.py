@@ -184,25 +184,20 @@ class Motor:
         hora = ent.hora
         tipo = ent.tipo
 
-        # modelado de compartido 50/50 (debe estar antes del dry-run)
-        participantes, reparto = [], ""
-        monto_total = None
-        monto_usuario = None
+        # Compartido (mitad 50/50): se etiqueta como U3 (mitad) en la columna
+        # usuario, manteniendo el monto completo. La hoja sigue con 16 columnas.
         if ent.compartido and grupo == "hogar":
-            participantes = ["U1", "U2"]
-            monto_total = monto
-            monto_usuario = int(round(monto / 2))
-            reparto = "50/50"
+            usuario = "U3"
+            es_compartido = True
+        else:
+            es_compartido = False
         if dry_run:
             return ["DRY-RUN " + str({
                 "hoja": config.GROUPS[grupo][0], "grupo": grupo, "tipo": tipo,
-                "monto": disp, "monto_num": monto, "compartido": ent.compartido,
+                "monto": disp, "monto_num": monto, "compartido": es_compartido,
                 "categoria": cat,
                 "subcategoria": sub, "metodo": metodo, "descripcion": desc,
-                "usuario": usuario, "productos": ent.productos,
-                "participantes": participantes, "reparto": reparto,
-                "monto_total": to_display(monto_total) if monto_total else "",
-                "monto_usuario": to_display(monto_usuario) if monto_usuario else ""})]
+                "usuario": usuario, "productos": ent.productos})]
 
         if self.srv is None:
             return ["⚠️ No hay conexión con Google Sheets en este momento. Intenta de nuevo."]
@@ -215,9 +210,6 @@ class Motor:
             "usuario": usuario, "tipo": tipo, "monto_display": disp,
             "categoria": cat, "subcategoria": sub, "desc": desc,
             "metodo": metodo, "evidencia": evidencia,
-            "monto_total": to_display(monto_total) if monto_total else "",
-            "monto_usuario": to_display(monto_usuario) if monto_usuario else "",
-            "participantes": participantes, "reparto": reparto,
         })
 
         op_key = hashlib.sha1(
@@ -232,8 +224,8 @@ class Motor:
             if tipo != "Ingreso":
                 storage.get_inventario().add(grupo, prod, fecha, monto, cat)
         head = "✅ Registrado: %s · %s %s · %s (%s)" % (disp, tipo.lower(), cat, sub, metodo)
-        if ent.compartido:
-            head += " · compartido 50/50 (U1/U2, %s cada uno)" % to_display(monto_usuario)
+        if es_compartido:
+            head += " · compartido 50/50 (U3 · %s c/u)" % to_display(int(round(monto / 2)))
         return [head, "id: %s · hoja: %s" % (row_id, grupo)]
 
     def _palabra_candidata(self, texto, ent):

@@ -54,6 +54,14 @@ PERMISOS = {
 # modificar o eliminar aprendizajes globales.
 ADMIN_USERS = {"U1"}
 
+# Etiquetas de usuario usadas en la columna "usuario" de las hojas.
+USER_LABELS = {
+    "U1": "U1",
+    "U2": "U2",
+    "U3": "U3",   # compra compartida (mitad/mitad) - solo aplica en Hogar
+}
+# Para gastos compartidos se usa U3 (mitad), no un pseudo-reparto en columnas.
+
 # --- Identidad de remitentes (query params -> usuario) ---------------------
 _PHONE_KEY = {
     "3002084572": "U1",

@@ -4,10 +4,12 @@ FakeSrv replica la superficie minima del cliente Google Sheets usada por
 finanzas.sheets, para poder probar append/consulta/anulacion sin red.
 El registro usa checklist: tras pedir datos, se confirma con 'si'.
 """
+import datetime
 import os
 import sys
 import tempfile
 import threading
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from finanzas.intents import Motor  # noqa: E402
 from finanzas import config, storage, sheets  # noqa: E402
+from finanzas.entities import extraer_fecha, extraer_hora, resolver_descripcion  # noqa: E402
 from finanzas.normalize import parse_monto, analizar_monto  # noqa: E402
 import finanzas.rules as _rules_mod  # noqa: E402
 
@@ -30,7 +33,7 @@ class FakeValues:
         self.srv = srv
 
     def append(self, spreadsheetId, range, valueInputOption, insertDataOption, body):
-        return _FakeCall(self.srv.append, body["values"][0])
+        return _FakeCall(self.srv.append, range, insertDataOption, body["values"][0])
 
     def get(self, spreadsheetId, range):
         return _FakeCall(self.srv.get, range)
@@ -62,17 +65,24 @@ class FakeSrv:
                       "desc_norm", "metodo", "evidencia", "estado", "prioridad"]]
         self.lock = threading.Lock()
         self.anuladas = 0
+        self.append_calls = []       # evidencia de uso de append + INSERT_ROWS
+        self.get_calls = 0           # lecturas masivas (no deben usarse para la fila)
+        self.sin_updated_range = False
 
     def spreadsheets(self):
         return FakeSpreadsheet(self)
 
-    def append(self, row):
+    def append(self, range, insertDataOption, row):
         with self.lock:
+            self.append_calls.append({"range": range, "insertDataOption": insertDataOption})
+            if self.sin_updated_range:
+                return {}
             self.rows.append(list(row))
-            return {"updates": {"updatedRange": "Hoja 1!A%d:T%d" % (len(self.rows), len(self.rows))}}
+            return {"updates": {"updatedRange": "Hoja 1!A%d:P%d" % (len(self.rows), len(self.rows))}}
 
     def get(self, rng):
         with self.lock:
+            self.get_calls += 1
             return {"values": [r[:] for r in self.rows[1:]]}
 
     def update(self, rng, row):
@@ -485,7 +495,7 @@ def test_append_idempotente_no_duplica(motor):
     n_inv = len(storage.get_inventario().all())
     # reintento: mismo texto/monto/usuario -> mismo op_key -> ya registrado
     _a, r2 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
-    assert "ya estaba registrada" in r2, r2
+    assert "Ya estaba registrado" in r2, r2
     assert len(srv.rows) == n_filas
     assert _historial_lines() == hist1
     assert len(storage.get_inventario().all()) == n_inv
@@ -574,9 +584,323 @@ def test_foto_ambiguo_pide_monto_y_usuario_lo_corrige(motor):
     r2 = _unpack(m.procesar("personal", "3002084572", "50000"))
     assert "No conozco" in r2 or "¿A qué categoría" in r2, r2
     r3 = _unpack(m.procesar("personal", "3002084572", "mercado"))
-    assert "Confirma el registro" in r3
-    assert "$50,000" in r3
-    r4 = _unpack(m.procesar("personal", "3002084572", "si"))
-    assert "✅" in r4
+    # sin caption ni línea OCR segura -> también se pide la descripción
+    assert "descripción" in r3.lower() or "descripcion" in r3.lower(), r3
+    r4 = _unpack(m.procesar("personal", "3002084572", "mercado de la quincena"))
+    assert "Confirma el registro" in r4
+    assert "$50,000" in r4
+    r5 = _unpack(m.procesar("personal", "3002084572", "si"))
+    assert "✅" in r5
     assert len(srv.rows) == 2
     assert srv.rows[-1][6] == "$50,000"
+    assert "quincena" in srv.rows[-1][10]
+
+
+# ==========================================================================
+# 16. Fecha/hora de recibos: prioridad OCR / mensaje Bogotá
+# ==========================================================================
+_TZ = ZoneInfo("America/Bogota")
+# 2026-08-09 14:59:00 America/Bogota (== 19:59 UTC si se usara UTC)
+MSG_TS = int(datetime.datetime(2026, 8, 9, 14, 59, tzinfo=_TZ).timestamp())
+
+
+def test_recibo_fecha_hora_completas_ocr(motor):
+    """OCR '9 agosto 2026 1:31 p. m.' -> 2026-08-09 13:31, origen recibo."""
+    m, srv = motor
+    texto = "Pago de camiseta $50.000,00\n9 agosto 2026 1:31 p. m."
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS)
+    s = _unpack(r)
+    assert "2026-08-09 13:31" in s, s
+    assert '"origen_fecha_hora": "recibo"' in s, s
+    assert '"monto": 50000' in s, s
+
+
+def test_recibo_solo_fecha_usa_hora_mensaje(motor):
+    """Fecha del recibo + hora del timestamp WhatsApp (Bogotá)."""
+    m, srv = motor
+    texto = "Pago de camiseta $50.000,00\nFecha 9 agosto 2026"
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS)
+    s = _unpack(r)
+    assert "2026-08-09 14:59" in s, s
+    assert '"origen_fecha_hora": "recibo"' in s, s
+
+
+def test_recibo_solo_hora_usa_fecha_mensaje(motor):
+    """Hora del recibo + fecha del timestamp WhatsApp (Bogotá)."""
+    m, srv = motor
+    texto = "Pago de camiseta $50.000,00\nHora 1:31 p. m."
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS)
+    s = _unpack(r)
+    assert "2026-08-09 13:31" in s, s
+    assert '"origen_fecha_hora": "recibo"' in s, s
+
+
+def test_ocr_llave_nit_cuenta_referencia_no_genera_fecha(motor):
+    """Llave/NIT/cuenta/referencia/UUID/año aislado nunca generan fecha/hora."""
+    m, srv = motor
+    texto = ("Pago de camiseta $50.000,00\n"
+             "Llave 3127702186\nNIT: 901.658,107-2\nCuenta m..B341\n"
+             "Referencia Becó413a-a7e5-4748-a572-d24daa543e3f\nAño 2026")
+    assert extraer_fecha(texto) is None, extraer_fecha(texto)
+    assert extraer_hora(texto) is None, extraer_hora(texto)
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS)
+    s = _unpack(r)
+    # sin fecha/hora confiable -> timestamp WhatsApp Bogotá, sin valores raros
+    assert '"origen_fecha_hora": "whatsapp_bogota"' in s, s
+    assert '"origen_fecha_hora": "recibo"' not in s, s
+
+
+def test_texto_sin_recibo_usa_bogota_no_utc(motor):
+    """Mensaje de texto sin recibo: America/Bogota, nunca UTC."""
+    m, srv = motor
+    r = m.procesar("personal", "3002084572", "pagué 5 mil de mercado",
+                   dry_run=True, ts_mensaje=MSG_TS)
+    s = _unpack(r)
+    assert "2026-08-09 14:59 (whatsapp_bogota)" in s, s
+    assert "19:59" not in s   # si se usara UTC mostraría 19:59
+
+
+def test_recibo_incidente_fecha_origen(motor):
+    """Regresión: el OCR del incidente (07 AGO 2026 - 05:59:08) es la fecha/hora."""
+    m, srv = motor
+    texto = "Pago de camiseta oversize hominidx, categoría ropa\n" + RECIBO_OCR
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS)
+    s = _unpack(r)
+    assert "2026-08-07 05:59 (recibo)" in s, s
+    assert "$50,000" in s
+
+
+# ==========================================================================
+# 17. Campo 4: edición de fecha/hora
+# ==========================================================================
+def test_campo4_acepta_fecha_valida(motor):
+    m, srv = motor
+    r1 = _unpack(m.procesar("personal", "3002084572", "pagué 5000 mercado"))
+    assert "Confirma el registro" in r1
+    r2 = _unpack(m.procesar("personal", "3002084572", "4"))
+    assert "AAAA-MM-DD HH:MM" in r2
+    r3 = _unpack(m.procesar("personal", "3002084572", "2026-08-09 13:31"))
+    assert "2026-08-09 13:31 (corregido)" in r3, r3
+    r4 = _unpack(m.procesar("personal", "3002084572", "si"))
+    assert "✅ Registrado" in r4
+    last = srv.rows[-1]
+    assert last[1] == "2026-08-09"
+    assert last[2] == "13:31"
+
+
+def test_campo4_rechaza_invalida_y_parciales(motor):
+    m, srv = motor
+    m.procesar("personal", "3002084572", "pagué 5000 mercado")
+    m.procesar("personal", "3002084572", "4")
+    for bad in ("2026-13-40 25:99", "2026-08-09", "13:31", "2026-08-09 13",
+                "hoy", "2026-08-09 13:31 y algo"):
+        s = _unpack(m.procesar("personal", "3002084572", bad))
+        assert "no válida" in s, (bad, s)
+    e = m.dlg.pendiente("personal", "3002084572")
+    assert e and e.get("pendiente") == "fecha"
+
+
+def test_campo4_cancelar_solo_limpia_sender(motor):
+    m, srv = motor
+    m.procesar("hogar", "3002084572", "pagué 5000 mercado")
+    m.procesar("hogar", "3002084572", "4")
+    m.procesar("hogar", "3147359270", "pagué 8000 mercado")
+    m.procesar("hogar", "3147359270", "4")
+    r = _unpack(m.procesar("hogar", "3002084572", "cancelar"))
+    assert "Cancelado" in r
+    assert m.dlg.pendiente("hogar", "3002084572") is None
+    e2 = m.dlg.pendiente("hogar", "3147359270")
+    assert e2 is not None and e2.get("pendiente") == "fecha"
+
+
+def test_campo4_cancelar_con_salir(motor):
+    m, srv = motor
+    m.procesar("personal", "3002084572", "pagué 5000 mercado")
+    m.procesar("personal", "3002084572", "4")
+    r = _unpack(m.procesar("personal", "3002084572", "salir"))
+    assert "Cancelado" in r
+    assert m.dlg.pendiente("personal", "3002084572") is None
+    assert len(srv.rows) == 1
+
+
+# ==========================================================================
+# 18. Google Sheets: append a la fila final (INSERT_ROWS) + updatedRange
+# ==========================================================================
+def test_append_usa_insert_rows_y_registra_fila(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "✅ Registrado" in rfinal
+    assert srv.append_calls
+    call = srv.append_calls[0]
+    assert call["insertDataOption"] == "INSERT_ROWS"
+    assert call["range"] == "Hoja 1!A:P"
+    # la fila real devuelta por updatedRange se guarda en el ledger
+    filas = [v.get("fila") for v in storage.get_ledger().data.values()]
+    assert filas == [2], filas
+    # no se leyó la hoja para calcular la fila
+    assert srv.get_calls == 0
+
+
+def test_append_dos_inserciones_filas_finales_distintas(motor):
+    m, srv = motor
+    _r1, r1 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    _r2, r2 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 8000 mercado")
+    assert "✅" in r1 and "✅" in r2
+    filas = [v.get("fila") for v in storage.get_ledger().data.values()]
+    assert filas == [2, 3], filas
+    assert len(srv.rows) == 3
+
+
+def test_append_sin_updated_range_no_muestra_exito(motor):
+    m, srv = motor
+    srv.sin_updated_range = True
+    _r1, rfinal = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "✅ Registrado" not in rfinal
+    assert "No se confirmó" in rfinal
+    assert len(srv.rows) == 1                # sin fila
+    assert storage.get_ledger().data == {}   # sin claim en ledger
+    assert srv.append_calls[0]["insertDataOption"] == "INSERT_ROWS"
+
+
+# ==========================================================================
+# 19. Descripción segura: caption limpio, nunca OCR completo
+# ==========================================================================
+def _diag(msgs):
+    """Extrae y parsea el JSON del mensaje DRY-RUN de la respuesta."""
+    import json as _json
+    for x in msgs:
+        s = str(x or "")
+        if s.startswith("DRY-RUN "):
+            return _json.loads(s[len("DRY-RUN "):])
+    return None
+
+
+def test_resolver_descripcion_prefiere_caption_limpio():
+    """Caption 'Pago de camiseta oversize hominidx, categoría ropa' -> limpio."""
+    cap = "Pago de camiseta oversize hominidx, categoría ropa"
+    desc, origen = resolver_descripcion(cap, RECIBO_OCR)
+    assert desc == "Camiseta oversize Hominidx", desc
+    assert origen == "caption", origen
+
+
+def test_resolver_descripcion_nunca_usa_ocr_tecnico():
+    """Recibo con solo campos técnicos -> None (pedir descripción)."""
+    desc, origen = resolver_descripcion(None, RECIBO_OCR)
+    assert desc is None and origen == "pendiente", (desc, origen)
+
+
+def test_resolver_descripcion_linea_ocr_segura():
+    ocr = "Comprobante de transferencia\nMonto $50.000,00\nCamiseta oversize\nLlave 3127702186"
+    desc, origen = resolver_descripcion(None, ocr)
+    assert desc == "Camiseta oversize", desc
+    assert origen == "ocr", origen
+
+
+def test_recibo_real_dryrun_campos_exactos(motor):
+    """Recibo Nu -> Nequi con caption: monto 50000, descripción caption limpia,
+    fecha/hora del recibo, y cero texto OCR técnico en la descripción."""
+    m, srv = motor
+    caption = "Pago de camiseta oversize hominidx, categoría ropa"
+    texto = caption + "\n" + RECIBO_OCR
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS,
+                   caption=caption, ocr_text=RECIBO_OCR)
+    s = _unpack(r)
+    d = _diag(r)
+    assert d is not None, s
+    assert d["monto"] == 50000, d
+    assert d["confianza_monto"] == "alta", d
+    assert d["descripcion"] == "Camiseta oversize Hominidx", d
+    assert d["origen_descripcion"] == "caption", d
+    assert d["fecha_hora"] == "2026-08-07 05:59", d
+    assert d["origen_fecha_hora"] == "recibo", d
+    assert d["decision"] == "checklist", d
+    assert d["candidatos_fecha"] == ["2026-08-07"], d
+    assert d["candidatos_hora"] == ["05:59"], d
+    low = d["descripcion"].lower()
+    for tech in ["llave", "3127702186", "nit", "cuenta", "referencia", "monto",
+                 "impuesto", "entidad", "comprobante", "laura", "esnaider", "bre-b"]:
+        assert tech not in low, (tech, d["descripcion"])
+
+
+def test_recibo_real_ocr_tesseract_dryrun(motor):
+    """El OCR REAL de tesseract del incidente también resuelve correcto."""
+    m, srv = motor
+    caption = "Pago de camiseta oversize hominidx, categoría ropa"
+    texto = caption + "\n" + REAL_RECIBO_OCR
+    r = m.procesar("personal", "3002084572", texto, imagen="/tmp/recibo.jpg",
+                   evidencia="recibo.jpg", dry_run=True, ts_mensaje=MSG_TS,
+                   caption=caption, ocr_text=REAL_RECIBO_OCR)
+    s = _unpack(r)
+    d = _diag(r)
+    assert d is not None, s
+    assert d["monto"] == 50000, d
+    assert d["descripcion"] == "Camiseta oversize Hominidx", d
+    assert d["origen_descripcion"] == "caption", d
+    assert d["fecha_hora"] == "2026-08-07 05:59", d
+    assert d["origen_fecha_hora"] == "recibo", d
+
+
+def test_ocr_solo_campos_tecnicos_pide_descripcion(motor):
+    """Recibo sin caption con OCR solo técnico: tras monto y categoría, pide
+    descripción (nunca usa el OCR completo)."""
+    m, srv = motor
+    ocr = "Monto total $50.000,00\n07 AGO 2026 - 05:59:08\nLlave 3127702186"
+    r1 = _unpack(m.procesar("personal", "3002084572", ocr, imagen="/tmp/recibo.jpg",
+                            evidencia="recibo.jpg", caption=None, ocr_text=ocr))
+    assert "categoría" in r1.lower() or "No conozco" in r1, r1
+    # el usuario asigna la categoría -> falta la descripción -> se pregunta
+    r2 = _unpack(m.procesar("personal", "3002084572", "ropa"))
+    assert "descripción" in r2.lower() or "descripcion" in r2.lower(), r2
+    assert m.dlg.pendiente("personal", "3002084572").get("pendiente") == "descripcion"
+    # el usuario escribe la descripción -> checklist con ella
+    r3 = _unpack(m.procesar("personal", "3002084572", "camiseta oversize"))
+    assert "Confirma el registro" in r3, r3
+    e = m.dlg.pendiente("personal", "3002084572")
+    assert e["descripcion"] == "Camiseta oversize", e
+    assert "llave" not in e["descripcion"].lower()
+    # confirmar y verificar que la fila no lleva OCR técnico
+    r4 = _unpack(m.procesar("personal", "3002084572", "si"))
+    assert "✅" in r4
+    fila = srv.rows[-1]
+    assert fila[10] == "Camiseta oversize", fila
+    assert "3127702186" not in " ".join(fila), fila
+
+
+REAL_RECIBO_OCR = """Comprobante de
+transferencia
+
+07 AGO 2026 - 05:59:08
+
+Monto total $50.000,00
+Monto $50.000,00
+Impuesto 4x1,000 $0,00
+Vía Bre-B
+Número de comprobante
+790501A7SDAST71OS1O92ITTAOISIO40255
+
+Para
+
+Nombre LAURA RINCON
+Entidad Nequi
+Llave 3127702186
+Estado Completada
+De
+
+Nombre Esnaider Idrobo Zapata
+Entidad Nu C.F.
+Número de cuenta m..B341
+Nucs.
+
+NIT: 901.658,107-2
+
+Referencia interna
+Becó413a-a7e5-4748-a572-
+d24daa543e3f
+
+Más información >"""

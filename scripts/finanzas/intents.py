@@ -17,13 +17,46 @@ import hashlib
 import json
 import os
 import re
+from zoneinfo import ZoneInfo
 
 from . import config, sheets, storage
-from .entities import extraer_entidades, MESES, limpiar_descripcion
+from .entities import (extraer_entidades, candidatos_fecha, candidatos_hora,
+                       resolver_descripcion)
 from .normalize import normalize, to_display
 from .normalize import analizar_monto, parse_monto
 from .dialogue import Dialogue
 from .rules import get_rules
+
+_TZ_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def _ts_bogota(ts_mensaje=None):
+    """Timestamp del mensaje convertido a America/Bogota; si no llega, now() Bogota."""
+    if ts_mensaje:
+        try:
+            return datetime.datetime.fromtimestamp(float(ts_mensaje), tz=_TZ_BOGOTA)
+        except Exception:
+            pass
+    return datetime.datetime.now(_TZ_BOGOTA)
+
+
+_FECHA_USUARIO_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})[ t](\d{1,2}):(\d{2})(?::\d{2})?$")
+
+
+def _parse_fecha_usuario(texto):
+    """Valida 'AAAA-MM-DD HH:MM' estricto. Devuelve (fecha, hora) o None.
+
+    Solo acepta fecha y hora reales; valores parciales o garabateados → None.
+    """
+    m = _FECHA_USUARIO_RE.match(normalize(texto or "").strip())
+    if not m:
+        return None
+    try:
+        dt = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                               int(m.group(4)), int(m.group(5)))
+    except ValueError:
+        return None
+    return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
 
 
 class Motor:
@@ -33,7 +66,8 @@ class Motor:
         self.ap = storage.get_aprendizajes()
 
     # ================== ENTRY POINT ==================
-    def procesar(self, grupo, sender, texto="", imagen=None, evidencia="", dry_run=False):
+    def procesar(self, grupo, sender, texto="", imagen=None, evidencia="", dry_run=False,
+                 ts_mensaje=None, caption=None, ocr_text=None):
         storage.get_estados().limpiar_expirados()
         # 0) identidad y permisos ANTES de cualquier estado/registro/consulta
         usuario = config.user_from_sender(sender)
@@ -67,7 +101,8 @@ class Motor:
             return [self._frecuencia(grupo, texto)]
         if intent == "borrar":
             return self._borrar(grupo, sender, texto)
-        return self._registrar(grupo, sender, texto, imagen, evidencia, dry_run, perm, usuario)
+        return self._registrar(grupo, sender, texto, imagen, evidencia, dry_run, perm,
+                               usuario, ts_mensaje, caption=caption, ocr_text=ocr_text)
 
     # ================== INTENTOS ==================
     def _detectar_intent(self, texto, usuario):
@@ -121,10 +156,38 @@ class Motor:
         return "✅ Aprendí que '%s' = %s (%s). Vale para los 3 grupos." % (palabra, r[0], r[1])
 
     # ================== REGISTRO: checklist paso a paso ==================
+    def _resolver_fecha_hora(self, ent, imagen, dt_msg):
+        """Prioridad de fecha/hora para imágenes/recibos:
+
+          1) fecha y hora COMPLETAS y válidas del OCR -> origen 'recibo';
+          2) una sola parte del OCR + la faltante desde el timestamp del
+             mensaje convertido a America/Bogota -> origen 'recibo';
+          3) timestamp del mensaje en America/Bogota -> 'whatsapp_bogota';
+          4) now() en America/Bogota (solo si no hay recibo ni timestamp).
+
+        El caso 0 (corrección explícita del usuario) se resuelve en el flujo
+        del campo 4. Nunca se construye fecha/hora desde números aislados.
+        """
+        fecha_msg = dt_msg.strftime("%Y-%m-%d")
+        hora_msg = dt_msg.strftime("%H:%M")
+        if not imagen:
+            return fecha_msg, hora_msg, "whatsapp_bogota"
+        fecha_ocr = ent.fecha if ent else None
+        hora_ocr = ent.hora if ent else None
+        if fecha_ocr and hora_ocr:
+            return fecha_ocr, hora_ocr, "recibo"
+        if fecha_ocr:
+            return fecha_ocr, hora_msg, "recibo"
+        if hora_ocr:
+            return fecha_msg, hora_ocr, "recibo"
+        return fecha_msg, hora_msg, "whatsapp_bogota"
+
     def _nuevo_estado_registro(self, grupo, sender, texto, evidencia, usuario,
                                monto=None, cat=None, sub=None, fecha=None, hora=None,
-                               nombre_pendiente=None):
+                               origen_fecha_hora="whatsapp_bogota", descripcion=None,
+                               origen_descripcion="pendiente", nombre_pendiente=None):
         """Crea/continúa el estado conversacional del registro."""
+        now_bog = _ts_bogota()
         return {
             "accion": "registro",
             "texto": texto or "",
@@ -133,8 +196,11 @@ class Motor:
             "monto": monto,
             "categoria": cat,
             "subcategoria": sub,
-            "fecha": fecha or datetime.date.today().isoformat(),
-            "hora": hora or datetime.datetime.now().strftime("%H:%M"),
+            "fecha": fecha or now_bog.strftime("%Y-%m-%d"),
+            "hora": hora or now_bog.strftime("%H:%M"),
+            "origen_fecha_hora": origen_fecha_hora,
+            "descripcion": descripcion,
+            "origen_descripcion": origen_descripcion,
             "nombre_pendiente": nombre_pendiente,
         }
 
@@ -143,9 +209,14 @@ class Motor:
         lineas = ["📋 *Confirma el registro:*"]
         lineas.append("1) Monto: %s" % monto_disp)
         lineas.append("2) Categoría: %s (%s)" % (e["categoria"], e["subcategoria"]))
-        desc = e.get("texto") or ""
-        lineas.append("3) Descripción: %s" % limpiar_descripcion(desc) or "(sin detalle)")
-        lineas.append("4) Fecha/Hora: %s %s" % (e.get("fecha"), e.get("hora")))
+        desc = e.get("descripcion") or "(sin detalle)"
+        lineas.append("3) Descripción: %s" % desc)
+        fch, hor = e.get("fecha") or "", e.get("hora") or ""
+        if fch and hor:
+            lineas.append("4) Fecha/Hora: %s %s (%s)"
+                          % (fch, hor, e.get("origen_fecha_hora") or "whatsapp_bogota"))
+        else:
+            lineas.append("4) Fecha/Hora: pendiente de confirmar")
         quien = e.get("usuario")
         if es_compartido:
             quien = "U3 (mitad)"
@@ -163,26 +234,26 @@ class Motor:
         cat, sub = e.get("categoria"), e.get("subcategoria")
         if not cat:
             return ["⚠️ Falta la categoría. ¿A qué categoría pertenece?"]
-        desc = limitar(limpiar_descripcion(texto), 120)
+        desc = limitar(e.get("descripcion") or "", 120)
         tipo = ent.tipo if ent else "Gasto"
         metodo = (ent.metodo if ent else None) or "transferencia"
         es_compartido = bool(ent and ent.compartido and grupo == "hogar")
         usuario = e.get("usuario")
         if es_compartido:
             usuario = "U3"
-        fecha = e.get("fecha") or datetime.date.today().isoformat()
-        hora = e.get("hora") or datetime.datetime.now().strftime("%H:%M")
+        now_bog = _ts_bogota()
+        fecha = e.get("fecha") or now_bog.strftime("%Y-%m-%d")
+        hora = e.get("hora") or now_bog.strftime("%H:%M")
 
         # dry-run: nunca escribe Sheets/ledger/historial/inventario/aprendizaje
         if dry_run:
             anal = analizar_monto(texto)
-            return [self._diag_json(tipo, monto, anal, cat, metodo, desc, "registrar")]
-
-        # aprender el nombre nuevo GLOBALMENTE si se asignó una categoría
-        nombre = e.get("nombre_pendiente")
-        if nombre and cat:
-            self.dlg.aprender_global(nombre, cat, sub, confirmado_por=sender)
-            storage.log_evento(grupo, "aprendido", {"palabra": nombre, "cat": cat, "sub": sub})
+            return [self._diag_json(tipo, monto, anal, cat, metodo, desc, "registrar",
+                                    origen_desc=e.get("origen_descripcion"),
+                                    fecha=fecha, hora=hora,
+                                    origen_fecha=e.get("origen_fecha_hora"),
+                                    cand_fecha=candidatos_fecha(texto),
+                                    cand_hora=candidatos_hora(texto))]
 
         if self.srv is None:
             return ["⚠️ No hay conexión con Google Sheets en este momento. Intenta de nuevo."]
@@ -200,12 +271,17 @@ class Motor:
         ).hexdigest()
         _rng, _id = sheets.append_row(self.srv, sid, op_key, row)
         if _rng is None:
-            # el operation_id ya estaba reclamado: no hubo escritura nueva
-            return ["ℹ️ Esta operación ya estaba registrada (id: %s). No se duplicó nada." % _id]
+            # el operation_id ya estaba reclamado: sin fila ni efectos secundarios
+            return ["ℹ️ Ya estaba registrado (id: %s). No se duplicó nada." % _id]
         if not _rng:
             # append sin updatedRange: no se confirmó ninguna escritura
             return ["⚠️ No se confirmó la escritura en la hoja. No se guardó nada. Reintenta."]
 
+        # Solo tras confirmar la escritura: aprender, historial e inventario.
+        nombre = e.get("nombre_pendiente")
+        if nombre and cat:
+            self.dlg.aprender_global(nombre, cat, sub, confirmado_por=sender)
+            storage.log_evento(grupo, "aprendido", {"palabra": nombre, "cat": cat, "sub": sub})
         storage.log_evento(grupo, "registro", {"id": row_id, "monto": disp,
                                                "categoria": cat, "desc": desc,
                                                "metodo": metodo, "usuario": usuario})
@@ -217,18 +293,35 @@ class Motor:
             head += " · compartido 50/50 (U3 · %s c/u)" % to_display(int(round(monto / 2)))
         return [head, "id: %s · hoja: %s" % (row_id, grupo)]
 
-    def _diag_json(self, tipo, monto, anal, cat, metodo, descripcion, decision):
-        """JSON de dry-run: solo describe la decisión, nunca persiste nada."""
-        return "DRY-RUN " + json.dumps({
+    def _diag_json(self, tipo, monto, anal, cat, metodo, descripcion, decision,
+                   origen_desc=None, fecha=None, hora=None, origen_fecha=None,
+                   cand_fecha=None, cand_hora=None):
+        """JSON de dry-run: solo describe la decisión, nunca persiste nada.
+
+        Nombres exactos de campos: monto, confianza_monto, descripcion,
+        origen_descripcion, fecha_hora, origen_fecha_hora, decision.
+        """
+        d = {
             "tipo": tipo,
-            "monto": to_display(monto) if monto is not None else None,
-            "confianza_monto": anal.get("confianza"),
-            "candidatos_monto": anal.get("candidatos") or [],
-            "categoria": cat,
-            "metodo": metodo,
-            "descripcion": descripcion,
+            "monto": monto if monto is not None else None,
+            "confianza_monto": anal.get("confianza") if anal else None,
+            "descripcion": descripcion or "",
+            "origen_descripcion": origen_desc or "pendiente",
+            "fecha_hora": ("%s %s" % (fecha, hora)) if (fecha and hora) else None,
+            "origen_fecha_hora": origen_fecha or "whatsapp_bogota",
             "decision": decision,
-        }, ensure_ascii=False)
+        }
+        if cand_fecha is not None:
+            d["candidatos_fecha"] = cand_fecha
+        if cand_hora is not None:
+            d["candidatos_hora"] = cand_hora
+        if anal:
+            d["candidatos_monto"] = anal.get("candidatos") or []
+        if cat:
+            d["categoria"] = cat
+        if metodo:
+            d["metodo"] = metodo
+        return "DRY-RUN " + json.dumps(d, ensure_ascii=False)
 
     def _msg_pedir_monto(self, anal):
         """Ante monto ambiguo/ausente en una foto: muestra candidatos y pide el
@@ -260,6 +353,40 @@ class Motor:
 
     def _continuar_registro(self, grupo, sender, texto, estado, dry_run):
         t = normalize(texto or "").strip()
+        # pendiente de fecha/hora (campo 4): pedir formato AAAA-MM-DD HH:MM
+        if estado.get("pendiente") == "fecha":
+            if t in _SINONIMOS_CANCELAR:
+                # descarta SOLO el pendiente de este grupo+sender
+                if not dry_run:
+                    self.dlg.limpiar(grupo, sender)
+                return ["✅ Cancelado. No guardé nada."]
+            r = _parse_fecha_usuario(texto)
+            if r is None:
+                return ["⚠️ Fecha/hora no válida. Usa: AAAA-MM-DD HH:MM (ej: 2026-08-09 13:31).\n"
+                        "O responde 'cancelar' para descartar el registro."]
+            estado["fecha"], estado["hora"] = r
+            estado["origen_fecha_hora"] = "corregido"
+            estado.pop("pendiente", None)
+            if not dry_run:
+                self.dlg.guardar(grupo, sender, estado)
+            return self._mostrar_checklist(grupo, sender, estado, dry_run)
+
+        # pendiente de descripción: capturar lo que escriba el usuario
+        if estado.get("pendiente") == "descripcion":
+            if t in _SINONIMOS_CANCELAR:
+                if not dry_run:
+                    self.dlg.limpiar(grupo, sender)
+                return ["✅ Cancelado. No guardé nada."]
+            d = normalize(texto or "").strip(" .,;:!?")
+            if not d or len(d) < 3:
+                return ["⚠️ Escribe una descripción válida (mínimo 3 letras) o 'cancelar'."]
+            estado["descripcion"] = limitar(d[:1].upper() + d[1:], 120)
+            estado["origen_descripcion"] = "caption"
+            estado.pop("pendiente", None)
+            if not dry_run:
+                self.dlg.guardar(grupo, sender, estado)
+            return self._mostrar_checklist(grupo, sender, estado, dry_run)
+
         # pendiente de monto (foto ambigua o corrección): capturar la cifra
         if estado.get("pendiente") == "monto":
             nm = analizar_monto(texto or "").get("monto")
@@ -272,6 +399,11 @@ class Motor:
                 if not dry_run:
                     self.dlg.guardar(grupo, sender, estado)
                 return [self.dlg._menu_categoria(estado.get("nombre_pendiente") or "ese registro")]
+            if not estado.get("descripcion"):
+                estado["pendiente"] = "descripcion"
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, estado)
+                return ["✍️ ¿Cuál es la descripción? (ej: 'mercado de la quincena')"]
             if not dry_run:
                 self.dlg.guardar(grupo, sender, estado)
             return self._mostrar_checklist(grupo, sender, estado, dry_run)
@@ -288,6 +420,11 @@ class Motor:
                 estado["categoria"] = r[0]
                 estado["subcategoria"] = r[1]
                 estado.pop("pendiente", None)
+                if not estado.get("descripcion"):
+                    estado["pendiente"] = "descripcion"
+                    if not dry_run:
+                        self.dlg.guardar(grupo, sender, estado)
+                    return ["✍️ ¿Cuál es la descripción? (ej: 'mercado de la quincena')"]
                 if not dry_run:
                     self.dlg.guardar(grupo, sender, estado)
                 return self._mostrar_checklist(grupo, sender, estado, dry_run)
@@ -314,8 +451,16 @@ class Motor:
                 if not dry_run:
                     self.dlg.guardar(grupo, sender, dict(estado, pendiente="categoria"))
                 return [self.dlg._menu_categoria(estado.get("nombre_pendiente"))]
-            if campo in (3, 4):
-                return ["✅ El registro se hará con la fecha/hora del mensaje. Responde 'si' para guardar."]
+            if campo == 3:
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, dict(estado, pendiente="descripcion"))
+                return ["✍️ ¿Cuál es la descripción? Escríbela o responde 'cancelar'."]
+            if campo == 4:
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, dict(estado, pendiente="fecha"))
+                return ["📅 Fecha/hora del registro (formato: AAAA-MM-DD HH:MM)\n"
+                        "Ejemplo: 2026-08-09 13:31\n"
+                        "O responde 'cancelar' para descartar el registro."]
         return [self._checklist(estado, False, to_display(estado.get("monto")))]
 
     def _mostrar_checklist(self, grupo, sender, estado, dry_run):
@@ -325,12 +470,20 @@ class Motor:
         return [self._checklist(estado, es_comp, to_display(estado.get("monto")))]
 
     # ================== REGISTRO (entrada) ==================
-    def _registrar(self, grupo, sender, texto, imagen, evidencia, dry_run, perm, usuario):
+    def _registrar(self, grupo, sender, texto, imagen, evidencia, dry_run, perm, usuario,
+                   ts_mensaje=None, caption=None, ocr_text=None):
+        dt_msg = _ts_bogota(ts_mensaje)
         ent = extraer_entidades(texto or "")
         monto = ent.monto
         anal = analizar_monto(texto or "")
         cat, sub = ent.categoria, ent.subcategoria
-        desc = limitar(limpiar_descripcion(texto or ""), 120)
+        fecha, hora, origen_fecha = self._resolver_fecha_hora(ent, bool(imagen), dt_msg)
+
+        # descripción: caption > comercio/producto > línea OCR segura > pendiente
+        cap = caption if caption is not None else (texto if not imagen else None)
+        ocr = ocr_text if ocr_text is not None else (texto if (imagen and not cap) else None)
+        desc, origen_desc = resolver_descripcion(cap, ocr, ent.comercio,
+                                                 ent.productos[0] if ent.productos else None)
 
         # si falta categoria, aplicar alias aprendido
         if not cat:
@@ -344,30 +497,43 @@ class Motor:
         if imagen and anal["confianza"] in ("ambiguo", "baja", "ninguno"):
             e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario,
                                             monto=monto, cat=cat, sub=sub,
-                                            fecha=ent.fecha, hora=ent.hora)
+                                            fecha=fecha, hora=hora,
+                                            origen_fecha_hora=origen_fecha,
+                                            descripcion=desc, origen_descripcion=origen_desc)
             if not dry_run:
                 e["pendiente"] = "monto"
                 self.dlg.guardar(grupo, sender, e)
             msgs = [self._msg_pedir_monto(anal)]
             if dry_run:
                 msgs.append(self._diag_json(ent.tipo, monto, anal, cat, ent.metodo, desc,
-                                            "pedir_monto"))
+                                            "pedir_monto", origen_desc=origen_desc,
+                                            fecha=fecha, hora=hora, origen_fecha=origen_fecha,
+                                            cand_fecha=candidatos_fecha(texto),
+                                            cand_hora=candidatos_hora(texto)))
             return msgs
 
         if monto is None:
-            e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario)
+            e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario,
+                                            fecha=fecha, hora=hora,
+                                            origen_fecha_hora=origen_fecha,
+                                            descripcion=desc, origen_descripcion=origen_desc)
             e["pendiente"] = "monto"
             if not dry_run:
                 self.dlg.guardar(grupo, sender, e)
             msgs = ["⚠️ ¿Cuál es el monto? Escríbelo con cifra (ej: '5000' o '5 mil') o envía la foto del recibo."]
             if dry_run:
                 msgs.append(self._diag_json(ent.tipo, None, anal, cat, ent.metodo, desc,
-                                            "pedir_monto"))
+                                            "pedir_monto", origen_desc=origen_desc,
+                                            fecha=fecha, hora=hora, origen_fecha=origen_fecha,
+                                            cand_fecha=candidatos_fecha(texto),
+                                            cand_hora=candidatos_hora(texto)))
             return msgs
 
         e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario,
                                         monto=monto, cat=cat, sub=sub,
-                                        fecha=ent.fecha, hora=ent.hora)
+                                        fecha=fecha, hora=hora,
+                                        origen_fecha_hora=origen_fecha,
+                                        descripcion=desc, origen_descripcion=origen_desc)
 
         if not cat:
             palabra = self._palabra_candidata(texto, ent)
@@ -381,7 +547,23 @@ class Motor:
                 msgs = ["⚠️ ¿A qué categoría asigno '%s'? Dímelo." % (texto[:40])]
             if dry_run:
                 msgs.append(self._diag_json(ent.tipo, monto, anal, None, ent.metodo, desc,
-                                            "pedir_categoria"))
+                                            "pedir_categoria", origen_desc=origen_desc,
+                                            fecha=fecha, hora=hora, origen_fecha=origen_fecha,
+                                            cand_fecha=candidatos_fecha(texto),
+                                            cand_hora=candidatos_hora(texto)))
+            return msgs
+
+        if not desc:
+            e["pendiente"] = "descripcion"
+            if not dry_run:
+                self.dlg.guardar(grupo, sender, e)
+            msgs = ["✍️ ¿Cuál es la descripción? (ej: 'mercado de la quincena')"]
+            if dry_run:
+                msgs.append(self._diag_json(ent.tipo, monto, anal, cat, ent.metodo, None,
+                                            "pedir_descripcion", origen_desc="pendiente",
+                                            fecha=fecha, hora=hora, origen_fecha=origen_fecha,
+                                            cand_fecha=candidatos_fecha(texto),
+                                            cand_hora=candidatos_hora(texto)))
             return msgs
 
         if not dry_run:
@@ -389,7 +571,10 @@ class Motor:
         msgs = self._mostrar_checklist(grupo, sender, e, dry_run)
         if dry_run:
             msgs.append(self._diag_json(ent.tipo, monto, anal, cat, ent.metodo, desc,
-                                        "checklist"))
+                                        "checklist", origen_desc=origen_desc,
+                                        fecha=fecha, hora=hora, origen_fecha=origen_fecha,
+                                        cand_fecha=candidatos_fecha(texto),
+                                        cand_hora=candidatos_hora(texto)))
         return msgs
 
     def _palabra_candidata(self, texto, ent):
@@ -531,6 +716,8 @@ class Motor:
 
 _SINONIMOS_SI = {"si", "sí", "sip", "dale", "confirma", "confirmar", "ok", "okey", "listo", "adelante", "guardar", "guarda"}
 _SINONIMOS_NO = {"no", "nop", "n", "cancelar", "cancela", "no guardes", "no registrar"}
+_SINONIMOS_CANCELAR = {"no", "nop", "n", "cancelar", "cancela", "salir", "salirme",
+                       "no guardes", "no registrar", "descartar"}
 
 
 def limitar(s, n):

@@ -306,8 +306,11 @@ class Ledger:
         e = self.data.get(op_key)
         return e.get("id") if e else None
 
-    def register(self, op_key, row_id):
-        self.data[op_key] = {"id": row_id, "ts": now_iso()}
+    def register(self, op_key, row_id, fila=None):
+        entry = {"id": row_id, "ts": now_iso()}
+        if fila is not None:
+            entry["fila"] = fila   # fila real devuelta por updatedRange
+        self.data[op_key] = entry
         # poda
         if len(self.data) > 5000:
             self.data = dict(list(self.data.items())[-3000:])

@@ -6,6 +6,7 @@ Uso (compatibilidad con adapter_whatsapp.py):
   gasto.py --grupo hogar --imagen /ruta/recibo.jpg --evidencia img_123.jpg
   gasto.py --grupo hogar --texto "..." --sender 573002084572
   gasto.py --grupo personal --texto "..." --dry-run
+  gasto.py --grupo personal --texto "..." --ts 1786373940   # epoch del mensaje
 
 El adapter Hermes invoca este binario via subprocess y devuelve stdout al chat.
 Se preservan --imagen, --evidencia, --sender y --dry-run.
@@ -31,6 +32,7 @@ def main():
     ap.add_argument("--imagen", default=None)
     ap.add_argument("--evidencia", default=None)
     ap.add_argument("--sender", default=None)
+    ap.add_argument("--ts", default=None, help="timestamp Unix del mensaje (epoch)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -54,6 +56,7 @@ def main():
 
     # OCR local (se mantiene de la version previa)
     texto = a.texto or ""
+    ocr_txt = None
     if a.imagen:
         from finanzas.entities import extraer_entidades
         ocr_txt = _ocr_local(a.imagen)
@@ -70,6 +73,9 @@ def main():
         imagen=a.imagen,
         evidencia=a.evidencia or (os.path.basename(a.imagen) if a.imagen else ""),
         dry_run=a.dry_run,
+        ts_mensaje=a.ts,
+        caption=a.texto or None,
+        ocr_text=ocr_txt,
     )
     for m in msgs:
         if m:

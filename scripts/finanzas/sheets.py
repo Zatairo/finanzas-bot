@@ -1,15 +1,21 @@
 """sheets.py — Capa Google Sheets con append no-destructivo.
 
-- append avec spreadsheets.values.append (INSERT_ROWS): no escanea 50k filas,
-  no calcula la ultima fila -> elimina la carrera/sobrescritura.
+- append con spreadsheets.values.append (INSERT_ROWS) SIEMPRE al final lógico:
+  no se calcula la fila leyendo la hoja, no se usa update sobre una fila
+  calculada -> elimina la carrera/sobrescritura.
+- la fila real se extrae de updates.updatedRange y se guarda en el ledger.
 - ids unicos (timestamp+uuid corto) sin escanear -> no hay reutilizacion.
 - idempotencia por reintento via op_key.
 - borrar = marcar estado 'anulado' (nunca se vacian filas).
 """
 import datetime
+import re
 import uuid
 
 from . import config
+
+# Rango de tabla para el append: inserta al final de las columnas A:P.
+_APPEND_RANGE = "Hoja 1!A:P"
 
 
 def _cred():
@@ -32,8 +38,20 @@ def gen_id():
     return "%s-%s" % (ts, uuid.uuid4().hex[:6].upper())
 
 
+def _extract_row(updated_range):
+    """'Hoja 1!A16:P16' -> 16 (fila real devuelta por Google). None si no hay."""
+    m = re.search(r"!A(\d+):", updated_range or "")
+    return int(m.group(1)) if m else None
+
+
 def append_row(srv, sid, op_key, row, retries=4, base=1.5):
-    """Append idempotente. Devuelve (filas_totales, row_id)."""
+    """Append idempotente a la última fila lógica de la tabla.
+
+    Devuelve:
+      (updated_range, row_id)  -> escritura confirmada (updatedRange existe)
+      (None, id_existente)     -> op_key ya reclamado (reintento idempotente)
+      ("", row_id)             -> sin updatedRange: no confirmada, sin claim
+    """
     from .storage import get_ledger
     ledger = get_ledger()
     existing = ledger.claim(op_key)
@@ -46,13 +64,18 @@ def append_row(srv, sid, op_key, row, retries=4, base=1.5):
         try:
             res = srv.spreadsheets().values().append(
                 spreadsheetId=sid,
-                range="Hoja 1!A1:P1",
+                range=_APPEND_RANGE,
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row]},
             ).execute()
-            updated = res.get("updates", {}).get("updatedRange") or ""
-            ledger.register(op_key, row_id)
+            updated = (res.get("updates") or {}).get("updatedRange") or ""
+            fila_real = _extract_row(updated)
+            if not fila_real:
+                # sin updatedRange no hay confirmación de escritura
+                return "", row_id
+            # guarda la fila REAL devuelta por Google (no una fila calculada)
+            ledger.register(op_key, row_id, fila=fila_real)
             return updated, row_id
         except Exception as e:
             last_err = e

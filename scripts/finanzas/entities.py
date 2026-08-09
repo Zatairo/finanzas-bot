@@ -72,6 +72,7 @@ def limpiar_descripcion(texto):
                " ", t)
     t = re.sub(r"\b(por|en|de|un|una|el|la|los|las|con|a|para|y|al|que|las|los)\b", " ", t)
     t = re.sub(r"\b(mil|medio|media|mitad|compartid\w*|partimos|cada uno|a medias)\b", " ", t)
+    t = re.sub(r"\b(peso?s?)\b", "", t)  # pesos = moneda
     for w in ["nequi", "daviplata", "davivienda", "bancolombia", "efectivo",
               "tarjeta", "transferencia", "contado", "credito", "debito", "pse"]:
         t = re.sub(r"\b%s\b" % re.escape(w), " ", t)

@@ -1,56 +1,64 @@
-"""intents.py — Orquestador de intenciones con permisos.
+"""intents.py — Orquestador de intenciones con permisos y checklist de registro.
 
 Entry point unico: procesar(grupo, sender, texto, ...)-> list[str/mensaje].
 Los tests inyectan un cliente de hojas (srv) falso; sin srv no se puede
 registrar ni consultar (se devuelve error controlado), salvo --dry-run.
+
+Flujo de registro (checklist paso a paso, sin inventar datos):
+  1. Se captura hora/fecha del mensaje y el valor (monto).
+  2. La descripcion se guarda en la columna descripcion.
+  3. Si la categoria no se deduce, se pregunta UNA vez.
+  4. Se muestra checklist y se pide confirmacion ('si') antes de escribir.
+  5. Un numero en el checklist permite corregir ese campo.
+  6. Palabras/negocios nuevos se aprenden GLOBALMENTE tras confirmar.
 """
 import datetime
 import hashlib
+import json
 import os
 import re
 
 from . import config, sheets, storage
 from .entities import extraer_entidades, MESES, limpiar_descripcion
 from .normalize import normalize, to_display
+from .normalize import analizar_monto, parse_monto
 from .dialogue import Dialogue
 from .rules import get_rules
 
 
-def _parse_monto_num(display):
-    return display
-
-
 class Motor:
     def __init__(self, srv=None):
-        self.srv = srv                 # cliente hojas (None en dry-run/offline)
+        self.srv = srv
         self.dlg = Dialogue()
         self.ap = storage.get_aprendizajes()
 
     # ================== ENTRY POINT ==================
     def procesar(self, grupo, sender, texto="", imagen=None, evidencia="", dry_run=False):
         storage.get_estados().limpiar_expirados()
-        estado = self.dlg.pendiente(grupo, sender)
+        # 0) identidad y permisos ANTES de cualquier estado/registro/consulta
+        usuario = config.user_from_sender(sender)
+        perm = bool(usuario) and config.can_write(grupo, usuario)
+        intent, arg = self._detectar_intent(texto, usuario)
+        if intent == "ayuda":
+            return [self._ayuda()]
+        if not usuario:
+            # remitente desconocido: rechazo claro, sin estado/ledger/escritura
+            return ["⛔ No reconozco tu número. No se guardó nada."]
+        if not perm:
+            if intent in ("presupuesto", "frecuencia", "consulta"):
+                return ["⛔ No tienes permiso para ver los datos de %s." % grupo]
+            return ["⛔ No tienes permiso para %s en %s." % (intent, grupo)]
+
         # 1) resolver conversaciones pendientes del MISMO sender+grupo
+        estado = self.dlg.pendiente(grupo, sender)
         if estado and not imagen:
             res = self._continuar_pendiente(grupo, sender, texto, estado, dry_run)
             if res:
                 return res
 
-        # 2) permisos de escritura
-        perm, usuario = config.authenticate(sender, grupo)
-        intent, arg = self._detectar_intent(texto, usuario)
-
-        if intent in ("presupuesto", "frecuencia") and not perm:
-            return ["⛔ No tienes permiso para ver los datos de %s." % grupo]
-        if intent in ("borrar", "revisar", "aprender", "registro") and not perm:
-            return ["⛔ No tienes permiso para %s en %s." % (intent, grupo)]
+        # 2) acciones administrativas y rutas
         if intent in ("revisar", "aprender") and not config.is_admin(usuario):
             return ["⛔ Solo el administrador puede ejecutar eso."]
-        if intent == "borrar" and not config.is_admin(usuario):
-            # owner de la transaccion o admin -> se valida al confirmar
-            pass
-        if intent == "ayuda":
-            return [self._ayuda()]
         if intent == "revisar":
             return [self._revisar(arg)]
         if intent == "presupuesto":
@@ -85,6 +93,7 @@ class Motor:
                 "• Registrar: 'pagué 5000 mercado por nequi'\n"
                 "• Ingreso: 'recibí 500 mil de salario'\n"
                 "• Compartido: 'compramos 80 mil a medias'\n"
+                "• El bot confirma con un checklist antes de guardar.\n"
                 "• Consulta: 'gastos de agosto', 'cuánto gasté'\n"
                 "• Presupuesto: 'presupuesto de comida 600 mil'\n"
                 "• Frecuencia: 'cada cuánto compro arroz'\n"
@@ -102,7 +111,6 @@ class Motor:
             return "⚠️ Usa: <palabra> = <categoría>"
         palabra = m.group(1)
         valor = m.group(2)
-        from .rules import get_rules
         r = get_rules().match_categoria(valor)
         if not r:
             r = get_rules().match_categoria("medicamento " + valor)
@@ -112,115 +120,96 @@ class Motor:
         storage.log_evento("-", "admin_aprende", {"palabra": palabra, "cat": r[0]})
         return "✅ Aprendí que '%s' = %s (%s). Vale para los 3 grupos." % (palabra, r[0], r[1])
 
-    # ================== CONTINUAR PENDIENTE ==================
-    def _continuar_pendiente(self, grupo, sender, texto, estado, dry_run):
-        if estado.get("accion") == "categoria":
-            r = self.dlg.parse_categoria_respuesta(texto)
-            if r == "no_se":
-                storage.log_evento(grupo, "aprendizaje_pendiente", {
-                    "palabra": estado.get("producto"), "sender": sender})
-                self.dlg.limpiar(grupo, sender)
-                return ["✅ Guardé '%s' para revisión del administrador (comando 'revisar')." % estado.get("producto")]
-            if r is not None:
-                estado["categoria"] = r[0]
-                estado["subcategoria"] = r[1]
-                self.dlg.aprender_global(estado.get("producto"), r[0], r[1],
-                                         confirmado_por=sender)
-                storage.log_evento(grupo, "aprendido", {
-                    "palabra": estado.get("producto"), "cat": r[0], "sub": r[1]})
-                self.dlg.limpiar(grupo, sender)
-                return self._registrar(grupo, sender, estado.get("texto") or "",
-                                       None, estado.get("evidencia") or "",
-                                       dry_run, True, estado.get("usuario"),
-                                       forzar=estado)
-            # respuesta sin entender -> re-preguntar
-            return [self.dlg._menu_categoria(estado.get("producto"))]
-        if estado.get("accion") == "borrar":
-            return self._confirmar_borrar(grupo, sender, texto, estado)
-        return None
+    # ================== REGISTRO: checklist paso a paso ==================
+    def _nuevo_estado_registro(self, grupo, sender, texto, evidencia, usuario,
+                               monto=None, cat=None, sub=None, fecha=None, hora=None,
+                               nombre_pendiente=None):
+        """Crea/continúa el estado conversacional del registro."""
+        return {
+            "accion": "registro",
+            "texto": texto or "",
+            "evidencia": evidencia or "",
+            "usuario": usuario,
+            "monto": monto,
+            "categoria": cat,
+            "subcategoria": sub,
+            "fecha": fecha or datetime.date.today().isoformat(),
+            "hora": hora or datetime.datetime.now().strftime("%H:%M"),
+            "nombre_pendiente": nombre_pendiente,
+        }
 
-    # ================== REGISTRO ==================
-    def _registrar(self, grupo, sender, texto, imagen, evidencia, dry_run, perm, usuario, forzar=None):
-        data = forzar or {}
-        ent = extraer_entidades(texto or "")
-        monto = ent.monto
+    def _checklist(self, e, es_compartido, monto_disp):
+        """Muestra el checklist del gasto a confirmar."""
+        lineas = ["📋 *Confirma el registro:*"]
+        lineas.append("1) Monto: %s" % monto_disp)
+        lineas.append("2) Categoría: %s (%s)" % (e["categoria"], e["subcategoria"]))
+        desc = e.get("texto") or ""
+        lineas.append("3) Descripción: %s" % limpiar_descripcion(desc) or "(sin detalle)")
+        lineas.append("4) Fecha/Hora: %s %s" % (e.get("fecha"), e.get("hora")))
+        quien = e.get("usuario")
+        if es_compartido:
+            quien = "U3 (mitad)"
+        lineas.append("5) Usuario: %s" % quien)
+        lineas.append("\nResponde *si* para guardar, o el número a corregir (1-4).")
+        return "\n".join(list(dict.fromkeys(lineas)))
+
+    def _finalizar_registro(self, grupo, sender, e, ent, dry_run):
+        """Tras confirmar, escribe en Sheets y aprende lo nuevo."""
+        texto = e.get("texto") or ""
+        monto = e.get("monto")
         if monto is None:
-            return ["⚠️ No encontré el monto. Escríbelo con cifra (ej: 'pagué 5000 mercado') o envía la foto del recibo."]
+            return ["⚠️ Falta el monto. ¿Cuánto fue?"]
         disp = to_display(monto)
-        cat, sub = ent.categoria, ent.subcategoria
-
-        # si falta categoria y hay un comercio/palabra candidata -> preguntar UNA vez
-        if not cat and texto and not ent.compartido:
-            palabra = self._palabra_candidata(texto, ent)
-            if palabra:
-                ctx = {
-                    "texto": texto, "monto": str(monto), "monto_disp": disp,
-                    "evidencia": evidencia, "usuario": usuario,
-                    "fecha": ent.fecha or datetime.date.today().isoformat(),
-                    "hora": ent.hora,
-                }
-                return [self.dlg.pedir_categoria(grupo, sender, ctx, palabra)]
-
-        # aplicar alias global aprendido (funciona en los 3 grupos)
+        cat, sub = e.get("categoria"), e.get("subcategoria")
         if not cat:
-            hit = self.ap.search(texto)
-            if hit:
-                _k, e = hit
-                cat = e.get("categoria") or None
-                sub = e.get("subcategoria") or None
-
-        if not cat:
-            # no hay forma de saber -> pregunta (una pasada)
-            palabra = self._palabra_candidata(texto, ent)
-            if palabra:
-                ctx = {"texto": texto, "monto": str(monto), "monto_disp": disp,
-                       "evidencia": evidencia, "usuario": usuario}
-                return [self.dlg.pedir_categoria(grupo, sender, ctx, palabra)]
-            return ["⚠️ ¿A qué categoría asigno '%s'? Dímelo o responde 'no sé'." % (texto[:40])]
-
+            return ["⚠️ Falta la categoría. ¿A qué categoría pertenece?"]
         desc = limitar(limpiar_descripcion(texto), 120)
-        metodo = ent.metodo or "transferencia"
-        fecha = ent.fecha or datetime.date.today().isoformat()
-        hora = ent.hora
-        tipo = ent.tipo
-
-        # Compartido (mitad 50/50): se etiqueta como U3 (mitad) en la columna
-        # usuario, manteniendo el monto completo. La hoja sigue con 16 columnas.
-        if ent.compartido and grupo == "hogar":
+        tipo = ent.tipo if ent else "Gasto"
+        metodo = (ent.metodo if ent else None) or "transferencia"
+        es_compartido = bool(ent and ent.compartido and grupo == "hogar")
+        usuario = e.get("usuario")
+        if es_compartido:
             usuario = "U3"
-            es_compartido = True
-        else:
-            es_compartido = False
+        fecha = e.get("fecha") or datetime.date.today().isoformat()
+        hora = e.get("hora") or datetime.datetime.now().strftime("%H:%M")
+
+        # dry-run: nunca escribe Sheets/ledger/historial/inventario/aprendizaje
         if dry_run:
-            return ["DRY-RUN " + str({
-                "hoja": config.GROUPS[grupo][0], "grupo": grupo, "tipo": tipo,
-                "monto": disp, "monto_num": monto, "compartido": es_compartido,
-                "categoria": cat,
-                "subcategoria": sub, "metodo": metodo, "descripcion": desc,
-                "usuario": usuario, "productos": ent.productos})]
+            anal = analizar_monto(texto)
+            return [self._diag_json(tipo, monto, anal, cat, metodo, desc, "registrar")]
+
+        # aprender el nombre nuevo GLOBALMENTE si se asignó una categoría
+        nombre = e.get("nombre_pendiente")
+        if nombre and cat:
+            self.dlg.aprender_global(nombre, cat, sub, confirmado_por=sender)
+            storage.log_evento(grupo, "aprendido", {"palabra": nombre, "cat": cat, "sub": sub})
 
         if self.srv is None:
             return ["⚠️ No hay conexión con Google Sheets en este momento. Intenta de nuevo."]
 
         sid = config.GROUPS[grupo][0]
-
         row_id = sheets.gen_id()
         row = sheets.build_row({
             "id": row_id, "fecha": fecha, "hora": hora, "grupo": grupo,
             "usuario": usuario, "tipo": tipo, "monto_display": disp,
             "categoria": cat, "subcategoria": sub, "desc": desc,
-            "metodo": metodo, "evidencia": evidencia,
+            "metodo": metodo, "evidencia": e.get("evidencia") or "",
         })
-
         op_key = hashlib.sha1(
             ("%s|%s|%s|%s" % (grupo, usuario, normalize(texto), str(monto))).encode("utf-8")
         ).hexdigest()
         _rng, _id = sheets.append_row(self.srv, sid, op_key, row)
+        if _rng is None:
+            # el operation_id ya estaba reclamado: no hubo escritura nueva
+            return ["ℹ️ Esta operación ya estaba registrada (id: %s). No se duplicó nada." % _id]
+        if not _rng:
+            # append sin updatedRange: no se confirmó ninguna escritura
+            return ["⚠️ No se confirmó la escritura en la hoja. No se guardó nada. Reintenta."]
+
         storage.log_evento(grupo, "registro", {"id": row_id, "monto": disp,
                                                "categoria": cat, "desc": desc,
                                                "metodo": metodo, "usuario": usuario})
-        # inventario
-        for prod in ent.productos:
+        for prod in (ent.productos if ent else []):
             if tipo != "Ingreso":
                 storage.get_inventario().add(grupo, prod, fecha, monto, cat)
         head = "✅ Registrado: %s · %s %s · %s (%s)" % (disp, tipo.lower(), cat, sub, metodo)
@@ -228,31 +217,199 @@ class Motor:
             head += " · compartido 50/50 (U3 · %s c/u)" % to_display(int(round(monto / 2)))
         return [head, "id: %s · hoja: %s" % (row_id, grupo)]
 
+    def _diag_json(self, tipo, monto, anal, cat, metodo, descripcion, decision):
+        """JSON de dry-run: solo describe la decisión, nunca persiste nada."""
+        return "DRY-RUN " + json.dumps({
+            "tipo": tipo,
+            "monto": to_display(monto) if monto is not None else None,
+            "confianza_monto": anal.get("confianza"),
+            "candidatos_monto": anal.get("candidatos") or [],
+            "categoria": cat,
+            "metodo": metodo,
+            "descripcion": descripcion,
+            "decision": decision,
+        }, ensure_ascii=False)
+
+    def _msg_pedir_monto(self, anal):
+        """Ante monto ambiguo/ausente en una foto: muestra candidatos y pide el
+        monto real. NO escribe Sheets ni reclama ledger."""
+        cands = anal.get("candidatos") or []
+        lineas = ["🤔 No identifiqué con certeza el monto del recibo."]
+        if cands:
+            unicos = []
+            vistos = set()
+            for c in cands:
+                v = c.get("valor")
+                if v in vistos:
+                    continue
+                vistos.add(v)
+                unicos.append("%s (%s)" % (to_display(v), (c.get("linea") or "")[:40]))
+            lineas.append("Detecté: %s" % " · ".join(unicos[:6]))
+        else:
+            lineas.append("No apareció un valor monetario claro (ej: $50.000,00 o '50 mil').")
+        lineas.append("¿Cuál es el monto real? Escríbelo con cifra, ej: '50000' o '50 mil'.")
+        return "\n".join(lineas)
+
+    def _continuar_pendiente(self, grupo, sender, texto, estado, dry_run):
+        accion = estado.get("accion")
+        if accion == "borrar":
+            return self._confirmar_borrar(grupo, sender, texto, estado)
+        if accion == "registro":
+            return self._continuar_registro(grupo, sender, texto, estado, dry_run)
+        return None
+
+    def _continuar_registro(self, grupo, sender, texto, estado, dry_run):
+        t = normalize(texto or "").strip()
+        # pendiente de monto (foto ambigua o corrección): capturar la cifra
+        if estado.get("pendiente") == "monto":
+            nm = analizar_monto(texto or "").get("monto")
+            if nm is None:
+                return ["⚠️ No identifiqué un monto válido. Escríbelo con cifra, ej: '50000' o '50 mil'."]
+            estado["monto"] = nm
+            estado.pop("pendiente", None)
+            if not estado.get("categoria"):
+                estado["pendiente"] = "categoria"
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, estado)
+                return [self.dlg._menu_categoria(estado.get("nombre_pendiente") or "ese registro")]
+            if not dry_run:
+                self.dlg.guardar(grupo, sender, estado)
+            return self._mostrar_checklist(grupo, sender, estado, dry_run)
+
+        # pendiente de categoria al inicio
+        if estado.get("pendiente") == "categoria":
+            r = self.dlg.parse_categoria_respuesta(texto)
+            if r == "no_se":
+                if not dry_run:
+                    self.dlg.limpiar(grupo, sender)
+                return ["✅ Guardé '%s' para revisión del administrador (comando 'revisar')."
+                        % estado.get("nombre_pendiente")]
+            if r is not None:
+                estado["categoria"] = r[0]
+                estado["subcategoria"] = r[1]
+                estado.pop("pendiente", None)
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, estado)
+                return self._mostrar_checklist(grupo, sender, estado, dry_run)
+            return [self.dlg._menu_categoria(estado.get("nombre_pendiente"))]
+
+        # hemos mostrado el checklist: 'si' guarda, numero corrige, 'no' cancela
+        if t in _SINONIMOS_SI:
+            if not dry_run:
+                self.dlg.limpiar(grupo, sender)
+            ent = extraer_entidades(estado.get("texto") or "")
+            return self._finalizar_registro(grupo, sender, estado, ent, dry_run)
+        if t in _SINONIMOS_NO:
+            if not dry_run:
+                self.dlg.limpiar(grupo, sender)
+            return ["✅ Cancelado. No guardé nada."]
+        # corregir un campo del checklist
+        if re.fullmatch(r"[1-4]", t):
+            campo = int(t)
+            if campo == 1:
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, dict(estado, pendiente="monto"))
+                return ["¿Cuál es el monto? (ej: 5000 o '5 mil')"]
+            if campo == 2:
+                if not dry_run:
+                    self.dlg.guardar(grupo, sender, dict(estado, pendiente="categoria"))
+                return [self.dlg._menu_categoria(estado.get("nombre_pendiente"))]
+            if campo in (3, 4):
+                return ["✅ El registro se hará con la fecha/hora del mensaje. Responde 'si' para guardar."]
+        return [self._checklist(estado, False, to_display(estado.get("monto")))]
+
+    def _mostrar_checklist(self, grupo, sender, estado, dry_run):
+        es_comp = bool(extraer_entidades(estado.get("texto") or "").compartido and grupo == "hogar")
+        if not dry_run:
+            self.dlg.guardar(grupo, sender, dict(estado, pendiente=None))
+        return [self._checklist(estado, es_comp, to_display(estado.get("monto")))]
+
+    # ================== REGISTRO (entrada) ==================
+    def _registrar(self, grupo, sender, texto, imagen, evidencia, dry_run, perm, usuario):
+        ent = extraer_entidades(texto or "")
+        monto = ent.monto
+        anal = analizar_monto(texto or "")
+        cat, sub = ent.categoria, ent.subcategoria
+        desc = limitar(limpiar_descripcion(texto or ""), 120)
+
+        # si falta categoria, aplicar alias aprendido
+        if not cat:
+            hit = self.ap.search(texto or "")
+            if hit:
+                _k, apd = hit
+                cat = apd.get("categoria")
+                sub = apd.get("subcategoria")
+
+        # foto con monto no confiable -> pedir confirmación, sin escribir nada
+        if imagen and anal["confianza"] in ("ambiguo", "baja", "ninguno"):
+            e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario,
+                                            monto=monto, cat=cat, sub=sub,
+                                            fecha=ent.fecha, hora=ent.hora)
+            if not dry_run:
+                e["pendiente"] = "monto"
+                self.dlg.guardar(grupo, sender, e)
+            msgs = [self._msg_pedir_monto(anal)]
+            if dry_run:
+                msgs.append(self._diag_json(ent.tipo, monto, anal, cat, ent.metodo, desc,
+                                            "pedir_monto"))
+            return msgs
+
+        if monto is None:
+            e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario)
+            e["pendiente"] = "monto"
+            if not dry_run:
+                self.dlg.guardar(grupo, sender, e)
+            msgs = ["⚠️ ¿Cuál es el monto? Escríbelo con cifra (ej: '5000' o '5 mil') o envía la foto del recibo."]
+            if dry_run:
+                msgs.append(self._diag_json(ent.tipo, None, anal, cat, ent.metodo, desc,
+                                            "pedir_monto"))
+            return msgs
+
+        e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario,
+                                        monto=monto, cat=cat, sub=sub,
+                                        fecha=ent.fecha, hora=ent.hora)
+
+        if not cat:
+            palabra = self._palabra_candidata(texto, ent)
+            e["nombre_pendiente"] = palabra
+            e["pendiente"] = "categoria"
+            if not dry_run:
+                self.dlg.guardar(grupo, sender, e)
+            if palabra:
+                msgs = [self.dlg._menu_categoria(palabra)]
+            else:
+                msgs = ["⚠️ ¿A qué categoría asigno '%s'? Dímelo." % (texto[:40])]
+            if dry_run:
+                msgs.append(self._diag_json(ent.tipo, monto, anal, None, ent.metodo, desc,
+                                            "pedir_categoria"))
+            return msgs
+
+        if not dry_run:
+            self.dlg.guardar(grupo, sender, e)
+        msgs = self._mostrar_checklist(grupo, sender, e, dry_run)
+        if dry_run:
+            msgs.append(self._diag_json(ent.tipo, monto, anal, cat, ent.metodo, desc,
+                                        "checklist"))
+        return msgs
+
     def _palabra_candidata(self, texto, ent):
-        """Devuelve una frase/comercio candidata a aprender (normalizada), no tokens sueltos."""
-        ap = self.ap  # ya aprendidos
-        hit = ap.search(texto)
-        if hit:
-            return None   # ya se conoce -> no preguntar
-        from .rules import get_rules
+        ap = self.ap
+        if ap.search(texto):
+            return None
         reglas = get_rules()
-        # comercio de regla conocida -> categoria resuelta, no preguntar
         if ent.comercio or reglas.match_categoria(texto):
             return None
-        # limpiar montos/metodos/palabras vacias y tomar el primer fragmento largo
         t = normalize(texto or "")
         t = re.sub(r"\$?\s?\d[\d.,]*\s*(mil|k|m)?", " ", t)
         t = re.sub(r"\b(pagu?e|pago|pagar|gast[oe]|compr[oea]|recib[ií]|compr\w+)\w*\b", " ", t)
         t = re.sub(r"\b(por|en|de|un|una|el|la|los|las|con|a|para|y|al|que|mil|medio|media|mitad)\b", " ", t)
+        t = re.sub(r"\b(pe[so]+)\b", " ", t)
         t = re.sub(r"\s+", " ", t).strip()
         frag = t.split()
         if not frag:
             return None
-        # tomar la frase de hasta 2 palabras, excluyendo verbos/stop cortos
         cand = " ".join(frag[:2])
-        if len(cand) < 3:
-            return None
-        return cand[:40]
+        return cand[:40] if len(cand) >= 3 else None
 
     # ================== PRESUPUESTO ==================
     def _presupuesto(self, grupo, texto):
@@ -261,13 +418,9 @@ class Motor:
         m = re.search(r"(\d[\d.,]*)\s*(k|mil|m|millon)?", t)
         definir = bool(re.search(r"\b(define|definir|pon|pongo|fija|fijar|de)\b", t) and m is not None)
         if definir and m:
-            from .normalize import parse_monto
-            monto = parse_monto("5000" if m.group(1).isdigit() else m.group(1))
             monto = parse_monto(t)
             if monto:
-                from .normalize import normalize as _n
-                reglas = get_rules()
-                r = reglas.match_categoria(t)
+                r = get_rules().match_categoria(t)
                 cat = r[0] if r else "Alimentacion"
                 p.set(grupo, cat, monto)
                 return ["✅ Presupuesto de %s = %s/mes en %s." % (cat, to_display(monto), grupo)]
@@ -309,7 +462,6 @@ class Motor:
     # ================== FRECUENCIA ==================
     def _frecuencia(self, grupo, texto):
         inv = storage.get_inventario().all()
-        from .rules import get_rules
         prods = get_rules().match_productos(texto or "")
         if prods:
             prod = prods[0]
@@ -340,14 +492,13 @@ class Motor:
             return ["⚠️ Sin conexión a Sheets."]
         sid = config.GROUPS[grupo][0]
         rows = sheets.leer_filas(self.srv, sid)
-        # ultima fila activa
         idx = None
         for i, row in enumerate(rows):
             if sheets.fila_activa(row):
                 idx = i
         if idx is None:
             return ["✅ No hay entradas que borrar."]
-        _real = idx + 2  # fila real (1 indexado + header)
+        _real = idx + 2
         row = (rows[idx] + [""] * 15)[:15]
         info = {"id": row[0], "fecha": row[1], "tipo": row[5], "monto": row[6],
                 "categoria": row[8], "desc": row[10], "usuario": row[4] if len(row) > 4 else ""}
@@ -363,8 +514,6 @@ class Motor:
             return ["✅ No borré nada. La entrada se mantiene."]
         if t not in _SINONIMOS_SI:
             return ["⚠️ Responde 'si' (borrar) o 'no' (cancelar)."]
-        # dueño: quien inicia el borrado (sender de este estado). El estado es por sender,
-        # asique otro remitente nunca llega aqui con un estado de categoria/borrar ajeno.
         if self.srv is None:
             return ["⚠️ Sin conexión a Sheets."]
         sid = config.GROUPS[grupo][0]
@@ -380,8 +529,8 @@ class Motor:
         return "• %s · %s · %s" % (info.get("fecha", "?"), info.get("monto", "?"), info.get("desc", "") or info.get("categoria", ""))
 
 
-_SINONIMOS_SI = {"si", "sí", "sip", "dale", "confirma", "confirmar", "ok", "okey", "listo", "adelante", "si borra", "borra si"}
-_SINONIMOS_NO = {"no", "nop", "n", "cancelar", "cancela", "no borres", "no la borres", "no lo borres"}
+_SINONIMOS_SI = {"si", "sí", "sip", "dale", "confirma", "confirmar", "ok", "okey", "listo", "adelante", "guardar", "guarda"}
+_SINONIMOS_NO = {"no", "nop", "n", "cancelar", "cancela", "no guardes", "no registrar"}
 
 
 def limitar(s, n):

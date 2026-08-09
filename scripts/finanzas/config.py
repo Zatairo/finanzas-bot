@@ -5,6 +5,7 @@ Los datos financieros quedan separados por grupo; los aprendizajes globales se
 comparten entre los 3 chats (requisito del producto).
 """
 import os
+import re
 
 # --- Base de datos del proyecto -------------------------------------------
 # Permite override con env FINANZAS_DATA_DIR; por defecto, datos junto al paquete.
@@ -62,42 +63,52 @@ USER_LABELS = {
 }
 # Para gastos compartidos se usa U3 (mitad), no un pseudo-reparto en columnas.
 
-# --- Identidad de remitentes (query params -> usuario) ---------------------
-_PHONE_KEY = {
-    "3002084572": "U1",
-    "573002084572": "U1",
-    "3147359270": "U2",
-    "573147359270": "U2",
+# --- Identidad de remitentes (tablas SEPARADAS: teléfono y LID) -----------
+# Un teléfono y un LID son identificadores distintos; un LID NO se resuelve
+# con sus últimos 10 dígitos (podría colisionar con un teléfono de otro).
+PHONE_TO_USER = {
+    "3002084572": "U1",   # Esnaider Idrobo
+    "3147359270": "U2",   # Andrea
 }
 
-# Soporte para pruebas / remitentes sin mapeo: se resuelve con el numero.
-TEST_USERS = {
-    "1111111111": "U1",
-    "2222222222": "U2",
+# LID de WhatsApp -> usuario. La coincidencia SIEMPRE es exacta contra esta
+# tabla y jamás se reduce a los últimos 10 dígitos.
+LID_TO_USER = {
+    "53201961234666": "U1",   # LID del teléfono 573002084572 (Esnaider)
+    "5063900668131": "U2",    # LID del teléfono 573147359270 (Andrea)
 }
 
-USER_PHONES = dict(_PHONE_KEY)
-USER_PHONES.update(TEST_USERS)
 
-
-def phone_key(phone):
-    d = "".join(ch for ch in (phone or "") if ch.isdigit())
+def _last10_digits(raw):
+    d = "".join(ch for ch in (raw or "") if ch.isdigit())
     return d[-10:] if len(d) >= 10 else d
 
 
-def user_from_phone(phone, default=None):
-    if not phone:
-        return default
-    k = phone_key(phone)
-    # probar el numero completo de 10 digitos y luego el prefijo 57
-    u = USER_PHONES.get(k) or USER_PHONES.get(phone)
-    if u:
-        return u
-    # ultimos 10 de cualquier formato
-    for src, user in USER_PHONES.items():
-        if phone_key(src) == k:
-            return user
-    return default
+def user_from_sender(raw_sender):
+    """Resuelve un remitente raw a U1/U2, o None si es desconocido.
+
+    Formatos aceptados:
+      - número pelado:        3002084572
+      - con prefijo:          +573002084572 / 573002084572
+      - wa.me:                wa.me/573002084572
+      - JID telefónico:       573002084572@s.whatsapp.net
+      - JID con dispositivo:  573002084572:10@s.whatsapp.net
+      - LID:                  53201961234666@lid (coincidencia EXACTA)
+
+    Un LID desconocido retorna None; nunca se trata como teléfono ni se
+    resuelve con sus últimos 10 dígitos.
+    """
+    s = (raw_sender or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"^wa\.me/", "", s)
+    s = s.replace("+", "")
+    if "@lid" in s:
+        lid = s.split("@")[0].split(":")[0]
+        return LID_TO_USER.get(lid)
+    local = s.split("@")[0] if "@" in s else s
+    local = local.split(":")[0]
+    return PHONE_TO_USER.get(_last10_digits(local))
 
 
 def can_write(grupo, usuario):
@@ -110,9 +121,8 @@ def is_admin(usuario):
 
 def authenticate(sender, grupo):
     """Devuelve (permiso_ok, usuario)."""
-    sid, _g, _d = GROUPS[grupo]
-    usuario = user_from_phone(sender)
+    usuario = user_from_sender(sender)
     if not usuario:
-        # sin identidad confiable -> denegar escritura
+        # sin identidad confiable -> denegar escritura/consulta
         return False, "?"
     return can_write(grupo, usuario), usuario

@@ -1,0 +1,21 @@
+{
+  "agentes": {
+    "personal": {"sheet": "14OPB7X4V4QL6RE20zqMoWztNoGEFGHDLUwk3u2zEQho", "grupo": "G1", "usuario": "U1"},
+    "hogar": {"sheet": "1WJMPeSNTlPzKF5TU2EljiwXU4d_O54CQpA1aJvatduM", "grupo": "G2", "usuario": "U2"},
+    "andrea": {"sheet": "1GQt6_AKWOp_GNKg2PAo0P-XObVPcekV2HyyZBuSa_iY", "grupo": "G1", "usuario": "U2"}
+  },
+  "columnas_hoja": ["id","fecha","hora","grupo","usuario","tipo","monto","moneda","categoria","subcategoria","descripcion_orig","descripcion_norm","metodo","evidencia","estado","prioridad"],
+  "categorias": ["Alimentacion","Vivienda","Transporte","Salud","Tecnologia","Educacion","Ocio","Ropa","Mascotas","Ingreso"],
+  "subcategorias_por_categoria": {
+    "Alimentacion": ["Mercado / plaza","Restaurante / comida fuera","Domicilios","Bebidas / snacks"],
+    "Vivienda": ["Arriendo","Servicios publicos","Internet / telefono","Aseo y hogar"],
+    "Transporte": ["Transporte publico / bus","Gasolina / combustible","Parqueadero / peaje","Mantenimiento vehiculo"],
+    "Salud": ["Medicamentos","Consulta medica / EPS","Gimnasio / bienestar"],
+    "Tecnologia": ["Componentes / electronica","Suscripciones digitales","Equipos / dispositivos"],
+    "Educacion": ["Cursos / certificaciones","Libros / materiales","Tesis / universidad"],
+    "Ocio": ["Entretenimiento / streaming","Salidas / reuniones","Viajes"],
+    "Ropa": ["Ropa y accesorios"],
+    "Mascotas": ["Alimento / veterinario"],
+    "Ingreso": ["Salario / nomina","Freelance / proyecto","Otros ingresos"]
+  }
+}

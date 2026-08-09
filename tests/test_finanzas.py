@@ -144,6 +144,10 @@ def test_pague_5mil_mercado_nequi(motor):
     assert "Mercado / plaza" in s
     assert "Gasto" in s
     assert "transferencia Nequi" in s
+    # formato con punto de miles + $ también funciona
+    r2 = m.procesar("personal", "3002084572", "pagué $5.000 de mercado",
+                    dry_run=True)
+    assert "monto_num': 5000" in _unpack(r2)
 
 
 # ==========================================================================

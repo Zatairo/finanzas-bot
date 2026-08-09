@@ -31,22 +31,36 @@ _WORD_MAG = {
 
 
 def _clean_num(s):
-    """Convierte '1.234,56' / '1,234.56' / '5.000' a float (miles como . o ,)."""
+    """Convierte '1.234,56' / '1,234.56' / '5.000' / '1.2' a float.
+
+    Regla determinista colombiana:
+      - un unico separador con 1-2 digitos a la derecha  -> decimal (1.2, 5,5)
+      - separadores que agrupan 3 digitos -> miles (5.000, 1.234.567)
+    """
     s = s.replace("$", "").strip()
     if not s:
         return None
-    comma = s.count(",")
-    dot = s.count(".")
-    if comma and dot:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "")
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif comma == 1 and (len(s.split(",")[1]) in (1, 2)):
-        s = s.replace(",", ".")
-    else:
-        s = s.replace(",", "").replace(".", "")
+    if not re.search(r"[.,]", s):
+        try:
+            return float(s)
+        except Exception:
+            return None
+    sep = None
+    for ch in (".", ","):
+        if s.count(ch) == 1:
+            prev, post = s.split(ch)
+            if post and not re.search(r"[.,]", post) and len(post) <= 2:
+                sep = ch
+                break
+    if sep:
+        # decimal (separador unico con 1-2 dec)
+        s2 = s.replace(sep, ".")
+        try:
+            return float(s2)
+        except Exception:
+            return None
+    # miles: quitar todos los separadores
+    s = re.sub(r"[.,]", "", s)
     try:
         return float(s)
     except Exception:
@@ -73,7 +87,7 @@ def parse_monto(text):
             found.append(int(val * mult))
     if not found:
         # numeros planos (con o sin separadores)
-        for m in re.finditer(r"(?:^|\s|\$|,)(\d{1,3}(?:[.,][\d{3}])+|\d+)(?=\s|$|[.,;])", t):
+        for m in re.finditer(r"(?:^|\s|\$|,)(\d{1,3}(?:[.,]\d{3})+|\d+)(?=\s|$|[.,;])", t):
             val = _clean_num(m.group(1))
             if val is not None:
                 found.append(int(val))

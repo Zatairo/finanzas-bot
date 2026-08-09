@@ -1,0 +1,138 @@
+# Reglas globales — compartidas por los 3 grupos (Personal, Hogar, Andrea).
+# Prioridad de resolucion:
+#   1. alias global aprendido (frase larga/exacta)
+#   2. regla de comercio/producto conocida
+#   3. regla de categoria
+#   4. preguntar al usuario
+
+categorias:
+  - { cat: "Transporte", sub: "Gasolina / combustible",
+      keywords: [gasolina, terpel, primax, puma energy, tanqueo, combustible] }
+  - { cat: "Alimentacion", sub: "Mercado / plaza", comercio: "mercado",
+      keywords: [mercado, exito, carulla, d1, justo y bueno, olimpica, supermercado,
+                 tienda, fruver, frutas, verduras, jumbo, makro, plaza] }
+  - { cat: "Alimentacion", sub: "Restaurante / comida fuera", comercio: "restaurante",
+      keywords: [restaurante, almuerzo, cena, desayuno, hamburguesa, pizza, pollo,
+                 corral, crepes, frisby, kokoriko, sanduche, sushi, asado, parrilla,
+                 comida, alimentacion, comer, almorzar, cenar] }
+  - { cat: "Alimentacion", sub: "Domicilios",
+      keywords: [domicilio, rappi, uber eats, didi food, ifood, delivery] }
+  - { cat: "Alimentacion", sub: "Bebidas / snacks",
+      keywords: [gaseosa, jugo, cafe, tinto, snack, papas, galletas, helado, dulce, bebida, ponque] }
+  - { cat: "Vivienda", sub: "Arriendo", keywords: [arriendo, renta] }
+  - { cat: "Vivienda", sub: "Servicios publicos (agua/luz/gas)",
+      keywords: [servicios publicos, agua, luz, gas, energia, enel] }
+  - { cat: "Vivienda", sub: "Internet / telefono",
+      keywords: [internet, claro, movistar, tigo, wifi, fibra, telefono, recarga] }
+  - { cat: "Vivienda", sub: "Aseo y hogar",
+      keywords: [aseo, jabon, shampoo, papel higienico, detergente, fabuloso, limpido] }
+  - { cat: "Transporte", sub: "Transporte publico / bus",
+      keywords: [bus, transmilenio, taxi, uber, pasaje, metro, sitp, transporte] }
+  - { cat: "Transporte", sub: "Parqueadero / peaje",
+      keywords: [parqueadero, parqueo, peaje, parking] }
+  - { cat: "Transporte", sub: "Mantenimiento vehiculo",
+      keywords: [taller, mecanico, llanta, filtro, frenos, bateria, cambio de aceite] }
+  - { cat: "Tecnologia", sub: "Componentes / electronica",
+      keywords: [electronica, tecnologia, celular, memoria, cargador, audifonos] }
+  - { cat: "Tecnologia", sub: "Suscripciones digitales",
+      keywords: [spotify, netflix, disney, hbo, youtube, prime, suscripcion, icloud, google one] }
+  - { cat: "Tecnologia", sub: "Equipos / dispositivos",
+      keywords: [computador, laptop, tablet, impresora] }
+  - { cat: "Salud", sub: "Medicamentos",
+      keywords: [drogueria, farmacia, medicamento, acetaminofen, ibuprofeno, pastillas, formula] }
+  - { cat: "Salud", sub: "Consulta medica / EPS",
+      keywords: [medico, doctor, eps, consulta, odontologo, laboratorio, salud, arl, planilla, seguridad social] }
+  - { cat: "Salud", sub: "Gimnasio / bienestar",
+      keywords: [gimnasio, gym, bodytech, entrenamiento] }
+  - { cat: "Educacion", sub: "Cursos / certificaciones",
+      keywords: [curso, certificacion, plataforma, taller, diplomado] }
+  - { cat: "Educacion", sub: "Libros / materiales",
+      keywords: [libro, papeleria, cuaderno, libreria] }
+  - { cat: "Educacion", sub: "Tesis / universidad",
+      keywords: [universidad, tesis, matricula, semestre] }
+  - { cat: "Ocio", sub: "Entretenimiento / streaming",
+      keywords: [cine, streaming, entrada, concierto, teatro, parque de diversiones] }
+  - { cat: "Ocio", sub: "Salidas / reuniones",
+      keywords: [bar, fiesta, salida, reunion, discoteca, cerveza] }
+  - { cat: "Ocio", sub: "Viajes",
+      keywords: [vuelo, tiquete, hotel, avion, aerolinea, viaje, airbnb] }
+  - { cat: "Ropa", sub: "Ropa y accesorios",
+      keywords: [ropa, zara, h&m, falabella, tenis, zapatos, camisa, pantalon, vestido, bolso] }
+  - { cat: "Mascotas", sub: "Alimento / veterinario",
+      keywords: [veterinario, veterinaria, mascota, perro, gato, concentrado] }
+  - { cat: "Ingreso", sub: "Salario / nomina",
+      keywords: [salario, nomina, sueldo, pago de nomina] }
+  - { cat: "Ingreso", sub: "Freelance / proyecto",
+      keywords: [freelance, proyecto, contrato, honorarios] }
+  - { cat: "Ingreso", sub: "Otros ingresos",
+      keywords: [ingreso, abono recibido, recibido, ganancia, venta, consignacion] }
+
+metodos:
+  - { nombre: "transferencia Nequi", keywords: [nequi, transferencia nu] }
+  - { nombre: "tarjeta debito", keywords: [tarjeta debito, debito] }
+  - { nombre: "tarjeta credito", keywords: [tarjeta credito, credito, rappi card] }
+  - { nombre: "PSE", keywords: [pse] }
+  - { nombre: "transferencia", keywords: [transferencia, banco, daviplata, bancolombia, efecty, pago movil] }
+  - { nombre: "efectivo", keywords: [efectivo, cash, contado] }
+
+productos:
+  - { nombre: "arroz", keywords: [arroz] }
+  - { nombre: "aceite", keywords: [aceite] }
+  - { nombre: "leche", keywords: [leche] }
+  - { nombre: "huevos", keywords: [huevo, huevos] }
+  - { nombre: "pan", keywords: [pan] }
+  - { nombre: "papa", keywords: [papa, papas] }
+  - { nombre: "tomate", keywords: [tomate, tomates] }
+  - { nombre: "cebolla", keywords: [cebolla] }
+  - { nombre: "pollo", keywords: [pollo] }
+  - { nombre: "carne", keywords: [carne] }
+  - { nombre: "pescado", keywords: [pescado] }
+  - { nombre: "cafe", keywords: [cafe, tinto] }
+  - { nombre: "azucar", keywords: [azucar] }
+  - { nombre: "sal", keywords: [sal] }
+  - { nombre: "detergente", keywords: [detergente] }
+  - { nombre: "jabon", keywords: [jabon] }
+  - { nombre: "shampoo", keywords: [shampoo, champu] }
+  - { nombre: "papel higienico", keywords: [papel higienico, rollos de papel] }
+  - { nombre: "toallas", keywords: [toalla, toallas, papel toalla] }
+  - { nombre: "servilletas", keywords: [servilleta, servilletas] }
+  - { nombre: "panales", keywords: [panal, panales] }
+  - { nombre: "concentrado mascotas", keywords: [concentrado] }
+  - { nombre: "fruver", keywords: [fruver, fruta, frutas, verduras] }
+  - { nombre: "galletas", keywords: [galleta, galletas] }
+  - { nombre: "snacks", keywords: [snack, snacks, papitas] }
+  - { nombre: "gaseosa", keywords: [gaseosa, gaseosas, coca, postobon] }
+  - { nombre: "jugo", keywords: [jugo, jugos] }
+  - { nombre: "cerveza", keywords: [cerveza, cervezas, pola] }
+  - { nombre: "gasolina", keywords: [gasolina, combustible] }
+  - { nombre: "medicamento", keywords: [acetaminofen, ibuprofeno, pastillas, vitaminas] }
+  - { nombre: "celular", keywords: [celular, movil] }
+  - { nombre: "cargador", keywords: [cargador] }
+  - { nombre: "audifonos", keywords: [audifonos] }
+  - { nombre: "libro", keywords: [libro, libros] }
+
+ingreso_hints:
+  - "recibí"
+  - "recibi"
+  - "me pagaron"
+  - "salario"
+  - "nomina"
+  - "nómina"
+  - "sueldo"
+  - "honorarios"
+  - "ingreso"
+  - "pago recibido"
+  - "consignacion"
+  - "consignación"
+  - "abono ahorro"
+
+gasto_hints:
+  - "pague"
+  - "pagué"
+  - "gaste"
+  - "compre"
+  - "compré"
+  - "gasté"
+  - "recargue"
+  - "abono a"
+  - "compramos"

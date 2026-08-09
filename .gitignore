@@ -7,17 +7,17 @@ google_token.json
 
 # Logs y temporales
 *.log
-/tmp/
 *.pid
 *.pyc
 __pycache__/
+.pytest_cache/
 
 # Entorno
 .env
 venv/
 .env.local
 
-# Datos de usuarios (no commitear)
+# Datos de usuarios (commitear solo el paquete y reglas, no el estado)
 scripts/aprendizajes.json
 scripts/cola_aprendizaje.json
 scripts/presupuestos.json
@@ -27,6 +27,15 @@ scripts/mega_config.json
 scripts/gasto_pendiente_*.json
 scripts/gasto_prodpend_*.json
 scripts/gasto_borrar_*.json
+
+# Estado runtime del nuevo motor (financiero / sensible / volátil)
+scripts/data/aprendizajes_globales.json
+scripts/data/presupuestos.json
+scripts/data/inventario.json
+scripts/data/historial.jsonl
+scripts/data/ledger.json
+scripts/data/estados/
+tmp/
 
 # OS
 .DS_Store

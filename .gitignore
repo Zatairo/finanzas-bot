@@ -1,0 +1,33 @@
+# Datos sensibles
+*.json
+!estructura.json
+google_token.json
+*.key
+*.pem
+
+# Logs y temporales
+*.log
+/tmp/
+*.pid
+*.pyc
+__pycache__/
+
+# Entorno
+.env
+venv/
+.env.local
+
+# Datos de usuarios (no commitear)
+scripts/aprendizajes.json
+scripts/cola_aprendizaje.json
+scripts/presupuestos.json
+scripts/inventario.json
+scripts/historial.jsonl
+scripts/mega_config.json
+scripts/gasto_pendiente_*.json
+scripts/gasto_prodpend_*.json
+scripts/gasto_borrar_*.json
+
+# OS
+.DS_Store
+Thumbs.db

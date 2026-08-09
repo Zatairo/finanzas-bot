@@ -21,9 +21,7 @@ cd finanzas-bot
 cp scripts/google_token.json.example scripts/google_token.json
 # Editar con tus credenciales OAuth de Google Sheets
 
-# 3. Mega (recibos)
-cp scripts/mega_config.json.example scripts/mega_config.json
-# Editar email/contraseña Mega
+# 3. Mega (recibos) — ver "Configurar recibos Mega" abajo
 
 # 3. Instalar deps
 pip install -r requirements.txt
@@ -88,6 +86,26 @@ finanzas-bot/
 | `presupuestos.json` | Límites por grupo+categoría |
 | `inventario.json` | Compras por producto (frecuencia) |
 | `historial.jsonl` | Log de todos los eventos |
+
+## Configurar recibos Mega
+
+La subida de recibos a Mega es privada y organizada por agente
+(`Recibos/Personal|Hogar|Andrea`). Está deshabilitada por defecto y nunca crea
+enlaces públicos. Crear el archivo real desde el ejemplo (fuera del repo):
+
+```bash
+cp scripts/mega_config.json.example "$HERMES_HOME/scripts/mega_config.json"
+chmod 600 "$HERMES_HOME/scripts/mega_config.json"
+```
+
+Editar solo el archivo real: `enabled: true` y las credenciales de Mega. El
+archivo real está en `.gitignore` y debe conservar permisos `0600`; si los
+permisos son inseguros, Mega se deshabilita automáticamente. La configuración
+también admite variables de entorno (`FINANZAS_MEGA_ENABLED`,
+`FINANZAS_MEGA_EMAIL`, `FINANZAS_MEGA_PASSWORD`, `FINANZAS_MEGA_FOLDER`,
+`FINANZAS_MEGA_CONFIG_PATH`) que tienen prioridad sobre el archivo. Los
+secretos nunca se imprimen ni se envían por WhatsApp; la hoja guarda solo la
+referencia interna (`mega_path`, `mega_node_id` o `evidencia_estado`).
 
 ## 🔧 Requisitos
 

@@ -1368,7 +1368,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         "comprar", "factura", "recibo", "abono", "nequi", "transferencia", "transferenc",
         "mercado", "recarga", "recargue", "recargué", "lleve", "llevé", "bancolombia",
         "davivienda", "pse", "claro", "internet", "gaseo", "drogueria", "arriendo",
-        "gasolina", "supermercado", "exito", "pago movil",
+        "gasolina", "supermercado", "exito", "pago movil", "valor", "monto", "total",
+        "subtotal",
         "borra", "borrar", "borre", "borralo", "cancela", "cancelar", "cancele",
         "anula", "anular", "no agregues", "no agregue", "no registres", "quita",
         "quitar", "elimina", "eliminar", "elimine", "deshacer", "ultima entrada",
@@ -1412,6 +1413,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return True
         if re.search(r"(^|\s)\d[\d.,]{4,}(\s|$)", t):
             return True
+        if re.search(r"(?:^|\s)\d{1,3}(?:[.,]\d{3})*\s*(mil|k)\b", t):
+            return True
         return any(re.search(r"\b" + re.escape(w) + r"\b", t) for w in self._GASTO_LIKE)
 
     async def _maybe_handle_expense_direct(self, msg_data, event) -> bool:
@@ -1428,7 +1431,13 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             is_query = not is_photo and self._looks_like_query(body)
             if not is_photo and not self._looks_like_expense(body) and not is_query and not (is_pend and len(body or "") <= 60):
                 print("[whatsapp] gasto NO parece gasto -> ignore", flush=True)
-                return False
+                fixed = ("No entendí el monto o la intención. "
+                         "Intenta con: 'pagué 20 mil en pan por snack' o usa 'ayuda'.")
+                try:
+                    await self.send(chat_id, fixed, reply_to=str(msg_data.get("id", "") or ""))
+                except Exception as _e:
+                    print("[whatsapp] fallo al enviar respuesta fija: %s" % _e, flush=True)
+                return True
             import sys as _sys
             hermes_home = os.environ.get("HERMES_HOME") or get_hermes_dir()
             script = os.path.join(hermes_home, "scripts", "gasto.py")

@@ -10,6 +10,21 @@ Bot determinista de finanzas para WhatsApp (sin LLM) que registra gastos/ingreso
 | **Hogar** | `120363426158712224@g.us` | `1WJMPeSNTlPzKF5TU2EljiwXU4d_O54CQpA1aJvatduM` | U2 |
 | **Andrea** | `120363429174326751@g.us` | `1GQt6_AKWOp_GNKg2PAo0P-XObVPcekV2HyyZBuSa_iY` | U2 |
 
+## 🏷 Etiquetas G1/G2/G3 y rol de administración
+
+Las claves internas de grupo siguen siendo `personal`, `hogar` y `andrea`
+(usadas en `--grupo`, `config.py`, las hojas y el ledger). Las etiquetas
+`G1/G2/G3` son SOLO de presentación (mensajes al usuario, logs y docs), nunca
+se usan como claves de datos, rutas, IDs de hoja ni columnas. `G3` no es un
+grupo financiero: es el canal/rol del administrador y no registra transacciones.
+
+| Código | Grupo interno | Nombre | Descripción | Registra transacciones |
+|--------|---------------|--------|-------------|------------------------|
+| G1 | personal | Finanzas personales | Ingresos y gastos propios | Sí |
+| G2 | hogar | Finanzas del hogar | Gastos compartidos con mi pareja | Sí |
+| — | andrea | Finanzas de Andrea | Ingresos y gastos propios de Andrea | Sí |
+| G3 | (rol admin, no es grupo financiero) | Administración privada | Control y validación del sistema | No |
+
 ## 🚀 Inicio rápido
 
 ```bash

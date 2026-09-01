@@ -30,7 +30,7 @@ AR_LEDGER = _data("ledger.json")
 AR_LEGACY_APRENDIZAJES = os.path.join(_BASE, "aprendizajes.json")
 
 # Estado conversacional: escribe en ruta persistente del proyecto (nunca /tmp).
-ESTADOS_TTL_SEG = int(os.environ.get("FINANZAS_TTL", "3600"))  # 10 min
+ESTADOS_TTL_SEG = int(os.environ.get("FINANZAS_TTL", "600"))  # 10 min
 
 # --- Hojas por grupo ------------------------------------------------------
 PERSONAL_SHEET = "14OPB7X4V4QL6RE20zqMoWztNoGEFGHDLUwk3u2zEQho"
@@ -43,6 +43,21 @@ GROUPS = {
     "hogar": (HOGAR_SHEET, "G2", "U2"),
     "andrea": (ANDREA_SHEET, "G1", "U2"),
 }
+
+# --- Etiquetas de presentacion (SOLO visual/logs/docs) ----------------------
+# NO son claves de datos: --grupo, config, hojas y ledger siguen usando
+# personal|hogar|andrea. G3 (admin) no es un grupo financiero: no tiene hoja,
+# no registra gastos/ingresos, no tiene presupuesto ni inventario.
+GROUP_LABELS = {
+    "personal": {"code": "G1", "nombre": "Finanzas personales",
+                 "descripcion": "Ingresos y gastos propios"},
+    "hogar": {"code": "G2", "nombre": "Finanzas del hogar",
+              "descripcion": "Gastos compartidos con mi pareja"},
+    "andrea": {"code": None, "nombre": "Finanzas de Andrea",
+               "descripcion": "Ingresos y gastos propios de Andrea"},
+}
+ADMIN_LABEL = {"code": "G3", "nombre": "Administración privada",
+               "descripcion": "Control y validación del sistema"}
 
 # Quien puede REGISTRAR/CONSULTAR en cada grupo (los datos financieros son por grupo)
 PERMISOS = {

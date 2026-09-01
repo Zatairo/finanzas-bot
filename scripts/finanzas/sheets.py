@@ -101,6 +101,19 @@ def leer_filas(srv, sid, rango="Hoja 1!A2:T50000"):
         return []
 
 
+def leer_fila(srv, sid, fila, rango=None):
+    """Lee UNA fila real (1-based) de la hoja. Devuelve la lista de celdas o
+    None si no existe. Se usa para auditar integridad (fila perdida externa).
+
+    Excepciones se propagan: el llamador decide si es un error transitorio
+    (no reinsertar) o una pérdida real.
+    """
+    rng = rango or "Hoja 1!A%d:P%d" % (fila, fila)
+    r = srv.spreadsheets().values().get(spreadsheetId=sid, range=rng).execute()
+    rows = r.get("values", []) or []
+    return rows[0] if rows else None
+
+
 def fila_activa(row):
     """True si la fila no esta anulada y tiene datos utiles."""
     if len(row) < 15:

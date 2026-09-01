@@ -57,9 +57,12 @@ def main():
     # OCR local (se mantiene de la version previa)
     texto = a.texto or ""
     ocr_txt = None
+    ocr_inestable = False
     if a.imagen:
         from finanzas.entities import extraer_entidades
-        ocr_txt = _ocr_local(a.imagen)
+        ocr_res = _ocr_local(a.imagen)
+        ocr_txt = ocr_res["text"]
+        ocr_inestable = ocr_res["inestable"]
         if a.texto:
             texto = a.texto + "\n" + ocr_txt
         else:
@@ -76,21 +79,57 @@ def main():
         ts_mensaje=a.ts,
         caption=a.texto or None,
         ocr_text=ocr_txt,
+        ocr_inestable=ocr_inestable,
     )
     for m in msgs:
         if m:
             print(m)
 
 
+def _preprocesar_ocr(path):
+    """Escala de grises + upscale 2x + autocontraste (PIL). Devuelve ruta tmp."""
+    import tempfile
+    from PIL import Image, ImageOps
+    im = Image.open(path).convert("L")
+    w, h = im.size
+    im = im.resize((int(w * 2), int(h * 2)), Image.LANCZOS)
+    im = ImageOps.autocontrast(im)
+    out = os.path.join(tempfile.gettempdir(), "finanzas_ocr_pre.png")
+    im.save(out)
+    return out
+
+
 def _ocr_local(path):
+    """Doble pasada de tesseract (--psm 6 y --psm 3) sobre la imagen
+    preprocesada. Devuelve {"text": str, "inestable": bool}.
+
+    Si los montos candidatos difieren entre pasadas, el candidato se marca
+    inestable (no se autoconfía). Si una pasada falla del todo, se conserva
+    la otra sin marcar inestable.
+    """
     import re
     import subprocess
+    from finanzas.normalize import analizar_monto
     try:
-        r = subprocess.run(["tesseract", path, "stdout", "-l", "spa", "--psm", "6"],
-                           capture_output=True, text=True, timeout=120)
-        return r.stdout or ""
+        pre = _preprocesar_ocr(path)
     except Exception:
-        return ""
+        pre = path  # sin PIL, tesseract sobre el original
+    salidas = {}
+    for psm in ("6", "3"):
+        try:
+            r = subprocess.run(["tesseract", pre, "stdout", "-l", "spa", "--psm", psm],
+                               capture_output=True, text=True, timeout=120)
+            salidas[psm] = r.stdout or ""
+        except Exception:
+            salidas[psm] = ""
+    txt6, txt3 = salidas.get("6", ""), salidas.get("3", "")
+    # valores candidatos de monto por cada pasada (independiente del formato)
+    vals6 = {c["valor"] for c in analizar_monto(txt6).get("candidatos", [])}
+    vals3 = {c["valor"] for c in analizar_monto(txt3).get("candidatos", [])}
+    inestable = bool(txt6 and txt3 and vals6 != vals3)
+    # el texto más rico (con montos) se usa para descripción/entidades
+    texto = txt6 if txt6.strip() else txt3
+    return {"text": texto, "inestable": inestable}
 
 
 if __name__ == "__main__":

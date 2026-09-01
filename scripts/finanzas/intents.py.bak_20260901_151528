@@ -19,7 +19,7 @@ import os
 import re
 from zoneinfo import ZoneInfo
 
-from . import config, sheets, storage, reportes, auditoria
+from . import config, sheets, storage
 from .entities import (extraer_entidades, candidatos_fecha, candidatos_hora,
                        resolver_descripcion)
 from .normalize import normalize, to_display
@@ -28,6 +28,16 @@ from .dialogue import Dialogue
 from .rules import get_rules
 
 _TZ_BOGOTA = ZoneInfo("America/Bogota")
+
+_G3_HEADER = "🔐 Administración privada (G3)"
+
+
+def _etiqueta_grupo(grupo):
+    """Nombre legible de un grupo: 'Finanzas personales (G1)' o 'Finanzas de
+    Andrea' (andrea no tiene código G*). Solo presentación."""
+    lab = config.GROUP_LABELS.get(grupo) or {}
+    code, nombre = lab.get("code"), lab.get("nombre") or grupo
+    return ("%s (%s)" % (nombre, code)) if code else nombre
 
 
 def _ts_bogota(ts_mensaje=None):
@@ -67,7 +77,7 @@ class Motor:
 
     # ================== ENTRY POINT ==================
     def procesar(self, grupo, sender, texto="", imagen=None, evidencia="", dry_run=False,
-                 ts_mensaje=None, caption=None, ocr_text=None):
+                 ts_mensaje=None, caption=None, ocr_text=None, ocr_inestable=False):
         storage.get_estados().limpiar_expirados()
         # 0) identidad y permisos ANTES de cualquier estado/registro/consulta
         usuario = config.user_from_sender(sender)
@@ -83,9 +93,9 @@ class Motor:
                 return ["⛔ No tienes permiso para ver los datos de %s." % grupo]
             return ["⛔ No tienes permiso para %s en %s." % (intent, grupo)]
 
-        # 1) resolver conversaciones pendientes del MISMO sender+grupo (comandos tienen prioridad sobre registro pendiente)
+        # 1) resolver conversaciones pendientes del MISMO sender+grupo
         estado = self.dlg.pendiente(grupo, sender)
-        if estado and not imagen and intent not in ("aprender", "revisar", "validar", "consulta", "presupuesto", "frecuencia", "ayuda", "borrar"):
+        if estado and not imagen:
             res = self._continuar_pendiente(grupo, sender, texto, estado, dry_run)
             if res:
                 return res
@@ -94,64 +104,54 @@ class Motor:
         if intent in ("revisar", "aprender") and not config.is_admin(usuario):
             return ["⛔ Solo el administrador puede ejecutar eso."]
         if intent == "revisar":
-            return [self._revisar(arg)]
+            return [_G3_HEADER, self._revisar(arg)]
         if intent == "aprender":
-            return [self._aprender_comando(arg)]
-        if intent == "validar":
-            return self._validar(grupo, texto)
+            return [_G3_HEADER, self._aprender_comando(arg)]
         if intent == "presupuesto":
             return [self._presupuesto(grupo, texto)]
         if intent == "frecuencia":
             return [self._frecuencia(grupo, texto)]
         if intent == "borrar":
             return self._borrar(grupo, sender, texto)
-        if intent == "consulta":
-            return self._consulta(grupo, texto)
         return self._registrar(grupo, sender, texto, imagen, evidencia, dry_run, perm,
-                               usuario, ts_mensaje, caption=caption, ocr_text=ocr_text)
+                               usuario, ts_mensaje, caption=caption, ocr_text=ocr_text,
+                               ocr_inestable=ocr_inestable)
 
     # ================== INTENTOS ==================
     def _detectar_intent(self, texto, usuario):
         t = normalize(texto or "")
-        if re.match(r"^[a-z0-9_ ]{3,}\s*=\s*.+", t):
+        if re.match(r"^[a-z]{3,}\s*=\s*[a-z0-9 ]+", t):
             return ("aprender", t)
-        # FIX andrea: priorizar registro si parece gasto aunque contenga fecha
-        _parece_gasto = bool(re.search(r"\b(pagu?e|gasto|compre|internet|arepas|mercado|pago|abono|tigo|claro|netflix|spotify|arriendo|gasolina|domicilio|arepa)\b", t))
-        _es_pregunta_resumen = bool(re.search(r"^\s*(resumen|muestr|cuanto|cuánto|balance|total|gastos de|resumen de)\b", t))
-        if _parece_gasto and not _es_pregunta_resumen:
-            pass
-        elif re.search(r"\b(ayuda|menu|menú|como usar|como se usa|como funciona|que sabes hacer|manual|instrucciones)\b", t):
+        if re.search(r"\b(ayuda|menu|menú|como usar|como se usa|como funciona|que sabes hacer|manual|instrucciones)\b", t):
             return ("ayuda", None)
         if re.search(r"\b(revisar|revision|cola de aprendizaje|pendientes de aprender|que me falta aprender)\b", t):
             return ("revisar", None)
         if re.search(r"\b(borra|borrar|borre|anula|anular|elimin\w+|ultima entrada|última entrada|ultimo gasto|deshaz\w*)\b", t):
             return ("borrar", None)
-        if re.search(r"\b(validar|auditar|auditoria|validacion)\b", t):
-            return ("validar", None)
         if re.search(r"\b(presupuesto|presupuestos)\b", t):
             return ("presupuesto", None)
         if re.search(r"\b(cada cuanto|cada cuánto|que tan seguido|frecuencia|inventario|que compro)\b", t):
             return ("frecuencia", None)
         if re.search(r"\b(resumen|cuanto|cuánto|total de gastos|gastos de|gaste|gastamos|ingresos de|mes pasado|este mes)\b", t):
             return ("consulta", None)
-        if re.search(r"\b(entre|desde|hasta|del\s+\d|rango|balance|totales)\b", t):
-            if re.search(r"\b(\d{4}[/-]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{4}|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|resumen|gastos|gasto|ingresos|ingreso)\b", t):
-                return ("consulta", None)
         return ("registro", None)
 
     def _ayuda(self):
-        return ("Bot de Finanzas - Guia\n"
-                "??? Registrar: 'pague 5000 mercado por nequi'\n"
-                "??? Ingreso: 'recibi 500 mil de salario'\n"
-                "??? Compartido: 'compramos 80 mil a medias'\n"
-                "??? Confirma con checklist antes de guardar.\n"
-                "??? Consulta: 'resumen entre 2026-08-01 y 2026-08-15', 'gastos de agosto'\n"
-                "??? Presupuesto: 'presupuesto de comida 600 mil'\n"
-                "??? Frecuencia: 'cada cuanto compro arroz'\n"
-                "??? Borrar: 'borra la ultima entrada'\n"
-                "??? Categorias: 'categorias' lista 1:1 (30). Si no conoces, elige 0. Otra y propone.\n"
-                "??? Validar: 'validar' o 'auditar' revisa tablas 1:1 sin anomalias\n"
-                "??? Ayuda: 'ayuda' | Admin: 'revisar', 'palabra = categoria', 'validar'")
+        return ("📱 *Bot de Finanzas — Guía*\n"
+                "Grupos:\n"
+                "• G1 · Finanzas personales (G1) — Ingresos y gastos propios\n"
+                "• G2 · Finanzas del hogar (G2) — Gastos compartidos con mi pareja\n"
+                "• G3 · Administración privada (G3) — solo el administrador; NO registra transacciones.\n"
+                "\n"
+                "• Registrar: 'pagué 5000 mercado por nequi'\n"
+                "• Ingreso: 'recibí 500 mil de salario'\n"
+                "• Compartido: 'compramos 80 mil a medias'\n"
+                "• El bot confirma con un checklist antes de guardar.\n"
+                "• Consulta: 'gastos de agosto', 'cuánto gasté'\n"
+                "• Presupuesto: 'presupuesto de comida 600 mil'\n"
+                "• Frecuencia: 'cada cuánto compro arroz'\n"
+                "• Borrar: 'borra la última entrada'\n"
+                "• Ayuda: 'ayuda' | Admin: 'revisar', 'xaran = salud'")
 
     def _revisar(self, arg):
         if arg:
@@ -159,43 +159,19 @@ class Motor:
         return "🗂 No hay palabras pendientes de revisión en este momento."
 
     def _aprender_comando(self, arg):
-        m = re.match(r"^([a-z0-9_ ]{3,})\s*=\s*(.+)$", normalize(arg))
+        m = re.match(r"^([a-z]{3,})\s*=\s*(.+)$", normalize(arg))
         if not m:
-            return "[!] Usa: <palabra> = <categoria>"
-        palabra = m.group(1).strip()
+            return "⚠️ Usa: <palabra> = <categoría>"
+        palabra = m.group(1)
         valor = m.group(2)
-        # typo correction for suscripcion y mercado
-        valor_norm = (valor or "").lower()
-        if "ssucrip" in valor_norm or "suscrip" in valor_norm:
-            valor = "suscripciones digitales"
-        if "mercado" in valor_norm:
-            # alimentacion,mercado -> Mercado / plaza (para la casa)
-            valor = "Mercado / plaza"
-        try:
-            from . import categorias as _cat_mod
-            exact = _cat_mod.find_exact(valor, srv=self.srv)
-            if exact:
-                r = exact
-            else:
-                r = get_rules().match_categoria(valor)
-                # fallback: try with suscripcion correction
-                if not r and "suscrip" in valor_norm:
-                    r = ("Tecnologia", "Suscripciones digitales", None)
-        except Exception:
-            r = get_rules().match_categoria(valor)
-            if not r and "suscrip" in (valor or "").lower():
-                r = ("Tecnologia", "Suscripciones digitales", None)
+        r = get_rules().match_categoria(valor)
         if not r:
-            try:
-                from . import categorias as _cat_mod
-                cats = _cat_mod.all_categorias(srv=self.srv)
-                sug = ", ".join(f"{c['cat']} - {c['sub']}" for c in cats[:5])
-                return "[!] No reconozco la categoria '%s'. Prueba con una de la hoja 1:1: %s. O usa 'categorias' para ver lista." % (valor, sug)
-            except Exception:
-                return "[!] No reconozco la categoria '%s'." % valor
+            r = get_rules().match_categoria("medicamento " + valor)
+        if not r:
+            return "⚠️ No reconozco la categoría '%s'." % valor
         self.dlg.aprender_global(palabra, r[0], r[1])
-        storage.log_evento("-", "admin_aprende", {"palabra": palabra, "cat": r[0], "sub": r[1]})
-        return "Listo! Aprendi que '%s' es '%s - %s'.\nLa proxima vez que menciones '%s' lo categorizare automaticamente en los 3 grupos (personal, hogar, andrea)." % (palabra, r[0], r[1], palabra)
+        storage.log_evento("-", "admin_aprende", {"palabra": palabra, "cat": r[0]})
+        return "✅ Aprendí que '%s' = %s (%s). Vale para los 3 grupos." % (palabra, r[0], r[1])
 
     # ================== REGISTRO: checklist paso a paso ==================
     def _resolver_fecha_hora(self, ent, imagen, dt_msg):
@@ -246,10 +222,16 @@ class Motor:
             "nombre_pendiente": nombre_pendiente,
         }
 
-    def _checklist(self, e, es_compartido, monto_disp):
+    def _checklist(self, e, es_compartido, monto_disp, grupo=None):
         """Muestra el checklist del gasto a confirmar."""
-        lineas = ["📋 *Confirma el registro:*"]
+        if grupo:
+            lineas = ["📋 *Confirma el registro — %s:*" % _etiqueta_grupo(grupo)]
+        else:
+            lineas = ["📋 *Confirma el registro:*"]
         lineas.append("1) Monto: %s" % monto_disp)
+        if e.get("evidencia") and e.get("monto") is not None:
+            lineas.append("📷 Monto leído de la foto: %s. Si no coincide, corrígelo con la opción 1."
+                          % to_display(e["monto"]))
         lineas.append("2) Categoría: %s (%s)" % (e["categoria"], e["subcategoria"]))
         desc = e.get("descripcion") or "(sin detalle)"
         lineas.append("3) Descripción: %s" % desc)
@@ -313,27 +295,85 @@ class Motor:
         ).hexdigest()
         _rng, _id = sheets.append_row(self.srv, sid, op_key, row)
         if _rng is None:
-            # el operation_id ya estaba reclamado: sin fila ni efectos secundarios
-            return ["ℹ️ Ya estaba registrado (id: %s). No se duplicó nada." % _id]
+            # op_key ya reclamado: verificar integridad de la fila antes de
+            # responder "ya estaba registrado" (pudo borrarse externamente).
+            return self._verificar_idempotente(grupo, sid, op_key, _id, row)
         if not _rng:
             # append sin updatedRange: no se confirmó ninguna escritura
             return ["⚠️ No se confirmó la escritura en la hoja. No se guardó nada. Reintenta."]
 
         # Solo tras confirmar la escritura: aprender, historial e inventario.
+        fila_real = sheets._extract_row(_rng)
         nombre = e.get("nombre_pendiente")
         if nombre and cat:
             self.dlg.aprender_global(nombre, cat, sub, confirmado_por=sender)
             storage.log_evento(grupo, "aprendido", {"palabra": nombre, "cat": cat, "sub": sub})
         storage.log_evento(grupo, "registro", {"id": row_id, "monto": disp,
                                                "categoria": cat, "desc": desc,
-                                               "metodo": metodo, "usuario": usuario})
+                                               "metodo": metodo, "usuario": usuario,
+                                               "updatedRange": _rng, "fila": fila_real,
+                                               "hoja_id": sid})
         for prod in (ent.productos if ent else []):
             if tipo != "Ingreso":
                 storage.get_inventario().add(grupo, prod, fecha, monto, cat)
-        head = "✅ Registrado: %s · %s %s · %s (%s)" % (disp, tipo.lower(), cat, sub, metodo)
+        head = "✅ Registrado (%s): %s · %s %s · %s (%s)" % (
+            _etiqueta_grupo(grupo), disp, tipo.lower(), cat, sub, metodo)
         if es_compartido:
             head += " · compartido 50/50 (U3 · %s c/u)" % to_display(int(round(monto / 2)))
         return [head, "id: %s · hoja: %s" % (row_id, grupo)]
+
+    def _verificar_idempotente(self, grupo, sid, op_key, row_id, row):
+        """Ruta idempotente: el op_key ya fue procesado. Verifica que la fila
+        siga existiendo en la posición registrada antes de responder.
+
+          - fila coincide (mismo id)          -> "ya estaba registrado"
+          - fila borrada/sobrescrita externa  -> reinserta con id derivado
+                                               "<id_original>-R1" y loguea
+                                               fila_perdida_externamente
+          - error transitorio de red al leer  -> NO toca ledger ni reinserta,
+                                                 responde error claro.
+        """
+        ledger = storage.get_ledger()
+        entry = ledger.data.get(op_key) or {}
+        fila = entry.get("fila")
+        if not fila:
+            # sin posición registrada no se puede auditar: mantener lo actual
+            return ["ℹ️ Ya estaba registrado (id: %s). No se duplicó nada." % row_id]
+        try:
+            existente = sheets.leer_fila(self.srv, sid, fila)
+        except Exception:
+            # error transitorio: no reinsertar ni tocar el ledger
+            return ["⚠️ No pude verificar el registro (error transitorio al leer la hoja). "
+                    "Reintenta en un momento. No se modificó nada."]
+        if existente is not None and str((existente + [""] * 2)[0] or "") == row_id:
+            return ["ℹ️ Ya estaba registrado (id: %s). No se duplicó nada." % row_id]
+
+        # fila ya no coincide -> pérdida/sobrescritura externa confirmada
+        r1_key = op_key + "-R1"
+        nuevo_id = "%s-R1" % row_id
+        reinsertado = ledger.claim(r1_key)
+        if reinsertado:
+            return ["ℹ️ Ya estaba registrado (id: %s). No se duplicó nada." % reinsertado]
+        row_r1 = list(row)
+        row_r1[0] = nuevo_id
+        try:
+            rng2, id2 = sheets.append_row(self.srv, sid, r1_key, row_r1)
+        except Exception as e:
+            return ["⚠️ Detecté la pérdida externa de la fila %s, pero no pude "
+                    "reinsertarla ahora (error de red). No se modificó el ledger. "
+                    "Reintenta: %s" % (fila, e)]
+        if rng2 is None:
+            return ["ℹ️ Ya estaba registrado (id: %s). No se duplicó nada." % id2]
+        if not rng2:
+            return ["⚠️ Detecté la pérdida externa de la fila %s, pero no se confirmó "
+                    "la reescritura. No se modificó el ledger. Reintenta." % fila]
+        fila_nueva = sheets._extract_row(rng2)
+        storage.log_evento(grupo, "fila_perdida_externamente",
+                           {"id": row_id, "fila": fila, "hoja": sid,
+                            "reinsertado_id": id2, "fila_nueva": fila_nueva,
+                            "updatedRange": rng2})
+        return ["⚠️ Detecté que la fila del registro id %s fue borrada o sobrescrita "
+                "externamente. La reinserté con id %s." % (row_id, id2)]
 
     def _diag_json(self, tipo, monto, anal, cat, metodo, descripcion, decision,
                    origen_desc=None, fecha=None, hora=None, origen_fecha=None,
@@ -365,11 +405,14 @@ class Motor:
             d["metodo"] = metodo
         return "DRY-RUN " + json.dumps(d, ensure_ascii=False)
 
-    def _msg_pedir_monto(self, anal):
+    def _msg_pedir_monto(self, anal, ocr_inestable=False):
         """Ante monto ambiguo/ausente en una foto: muestra candidatos y pide el
         monto real. NO escribe Sheets ni reclama ledger."""
         cands = anal.get("candidatos") or []
-        lineas = ["🤔 No identifiqué con certeza el monto del recibo."]
+        if ocr_inestable:
+            lineas = ["🔎 La lectura del recibo fue inconsistente entre dos pasadas de OCR."]
+        else:
+            lineas = ["🤔 No identifiqué con certeza el monto del recibo."]
         if cands:
             unicos = []
             vistos = set()
@@ -429,15 +472,11 @@ class Motor:
                 self.dlg.guardar(grupo, sender, estado)
             return self._mostrar_checklist(grupo, sender, estado, dry_run)
 
-        # pendiente de monto (foto ambigua o correccion): capturar la cifra
+        # pendiente de monto (foto ambigua o corrección): capturar la cifra
         if estado.get("pendiente") == "monto":
-            if t in _SINONIMOS_CANCELAR:
-                if not dry_run:
-                    self.dlg.limpiar(grupo, sender)
-                return ["Cancelado. No guarde nada. Puedes escribir 'validar' o 'resumen' sin perder el pendiente, o reenvia el gasto."]
             nm = analizar_monto(texto or "").get("monto")
             if nm is None:
-                return ["No identifique un monto valido. Escribelo con cifra, ej: '50000' o '50 mil'. Tip: escribe 'cancelar' para salir, o 'validar' para auditar sin perder este pendiente."]
+                return ["⚠️ No identifiqué un monto válido. Escríbelo con cifra, ej: '50000' o '50 mil'."]
             estado["monto"] = nm
             estado.pop("pendiente", None)
             if not estado.get("categoria"):
@@ -460,21 +499,8 @@ class Motor:
             if r == "no_se":
                 if not dry_run:
                     self.dlg.limpiar(grupo, sender)
-                    storage.log_evento(grupo, "pendiente_revision", {"palabra": estado.get("nombre_pendiente"), "motivo": "no_se", "texto": estado.get("texto")})
-                return ["Guarde '%s' para revision del administrador (comando 'revisar')."
+                return ["✅ Guardé '%s' para revisión del administrador (comando 'revisar')."
                         % estado.get("nombre_pendiente")]
-            if r == "otra":
-                estado["pendiente"] = "categoria_otra"
-                if not dry_run:
-                    self.dlg.guardar(grupo, sender, estado)
-                return ["Escribe la categoria que propones para '%s' (ej: Impuestos, Veterinaria, Ropa) o 'cancelar'.\nSi es una categoria de la hoja 1:1, escribe exactamente 'Categoria - Subcategoria'." % estado.get("nombre_pendiente")]
-            if r == "lista_categorias":
-                try:
-                    from . import categorias as _cat_mod
-                    lista = _cat_mod.format_lista(srv=self.srv)
-                except Exception:
-                    lista = "No pude cargar categorias 1:1"
-                return [lista, self.dlg._menu_categoria(estado.get("nombre_pendiente"))]
             if r is not None:
                 estado["categoria"] = r[0]
                 estado["subcategoria"] = r[1]
@@ -483,51 +509,11 @@ class Motor:
                     estado["pendiente"] = "descripcion"
                     if not dry_run:
                         self.dlg.guardar(grupo, sender, estado)
-                    return ["Cual es la descripcion? (ej: 'mercado de la quincena')"]
+                    return ["✍️ ¿Cuál es la descripción? (ej: 'mercado de la quincena')"]
                 if not dry_run:
                     self.dlg.guardar(grupo, sender, estado)
                 return self._mostrar_checklist(grupo, sender, estado, dry_run)
             return [self.dlg._menu_categoria(estado.get("nombre_pendiente"))]
-        # pendiente de categoria_otra (usuario eligio 0. Otra) - FIX: creacion inmediata sin supervisor
-        if estado.get("pendiente") == "categoria_otra":
-            t2 = normalize(texto or "").strip()
-            if t2 in _SINONIMOS_CANCELAR:
-                if not dry_run:
-                    self.dlg.limpiar(grupo, sender)
-                return ["Cancelado. No guarde nada."]
-            propuesta = (texto or "").strip()
-            if not propuesta or len(propuesta) < 2:
-                return ["Escribe una categoria valida (min 2 letras) o 'cancelar'."]
-            # Crear categoria inmediata: parsear propuesta
-            if " - " in propuesta:
-                cat_new, sub_new = [s.strip() for s in propuesta.split(" - ", 1)]
-            elif "-" in propuesta and len(propuesta.split("-"))==2:
-                cat_new, sub_new = [s.strip() for s in propuesta.split("-", 1)]
-            else:
-                cat_new, sub_new = propuesta.strip(), ""
-                cat_new = cat_new[:1].upper() + cat_new[1:] if cat_new else cat_new
-            if not cat_new:
-                cat_new = propuesta.strip()
-            # Aprender globalmente para futuros registros (sin esperar supervisor)
-            try:
-                nombre_orig = estado.get("nombre_pendiente") or ""
-                if nombre_orig:
-                    self.dlg.aprender_global(nombre_orig, cat_new, sub_new, confirmado_por=sender)
-                    storage.log_evento(grupo, "categoria_creada_usuario", {"palabra": nombre_orig, "propuesta": propuesta, "cat": cat_new, "sub": sub_new, "grupo": grupo})
-            except Exception:
-                pass
-            # Asignar categoria al estado actual y continuar al checklist sin reenviar
-            estado["categoria"] = cat_new
-            estado["subcategoria"] = sub_new
-            estado.pop("pendiente", None)
-            if not estado.get("descripcion"):
-                estado["pendiente"] = "descripcion"
-                if not dry_run:
-                    self.dlg.guardar(grupo, sender, estado)
-                return ["Categoria creada: '%s - %s'.\nCual es la descripcion? (ej: 'mercado de la quincena')" % (cat_new, sub_new or cat_new)]
-            if not dry_run:
-                self.dlg.guardar(grupo, sender, estado)
-            return self._mostrar_checklist(grupo, sender, estado, dry_run)
 
         # hemos mostrado el checklist: 'si' guarda, numero corrige, 'no' cancela
         if t in _SINONIMOS_SI:
@@ -560,17 +546,17 @@ class Motor:
                 return ["📅 Fecha/hora del registro (formato: AAAA-MM-DD HH:MM)\n"
                         "Ejemplo: 2026-08-09 13:31\n"
                         "O responde 'cancelar' para descartar el registro."]
-        return [self._checklist(estado, False, to_display(estado.get("monto")))]
+        return [self._checklist(estado, False, to_display(estado.get("monto")), grupo)]
 
     def _mostrar_checklist(self, grupo, sender, estado, dry_run):
         es_comp = bool(extraer_entidades(estado.get("texto") or "").compartido and grupo == "hogar")
         if not dry_run:
             self.dlg.guardar(grupo, sender, dict(estado, pendiente=None))
-        return [self._checklist(estado, es_comp, to_display(estado.get("monto")))]
+        return [self._checklist(estado, es_comp, to_display(estado.get("monto")), grupo)]
 
     # ================== REGISTRO (entrada) ==================
     def _registrar(self, grupo, sender, texto, imagen, evidencia, dry_run, perm, usuario,
-                   ts_mensaje=None, caption=None, ocr_text=None):
+                   ts_mensaje=None, caption=None, ocr_text=None, ocr_inestable=False):
         dt_msg = _ts_bogota(ts_mensaje)
         ent = extraer_entidades(texto or "")
         monto = ent.monto
@@ -593,7 +579,8 @@ class Motor:
                 sub = apd.get("subcategoria")
 
         # foto con monto no confiable -> pedir confirmación, sin escribir nada
-        if imagen and anal["confianza"] in ("ambiguo", "baja", "ninguno"):
+        # (ocr_inestable: las dos pasadas de OCR no coincidieron -> no autoconfiar)
+        if imagen and (ocr_inestable or anal["confianza"] in ("ambiguo", "baja", "ninguno")):
             e = self._nuevo_estado_registro(grupo, sender, texto, evidencia, usuario,
                                             monto=monto, cat=cat, sub=sub,
                                             fecha=fecha, hora=hora,
@@ -602,7 +589,7 @@ class Motor:
             if not dry_run:
                 e["pendiente"] = "monto"
                 self.dlg.guardar(grupo, sender, e)
-            msgs = [self._msg_pedir_monto(anal)]
+            msgs = [self._msg_pedir_monto(anal, ocr_inestable=ocr_inestable)]
             if dry_run:
                 msgs.append(self._diag_json(ent.tipo, monto, anal, cat, ent.metodo, desc,
                                             "pedir_monto", origen_desc=origen_desc,
@@ -684,10 +671,9 @@ class Motor:
         if ent.comercio or reglas.match_categoria(texto):
             return None
         t = normalize(texto or "")
-        t = re.sub(r"\b\$?\d[\d.,]*\s*(mil|k|m)?\b", " ", t)
+        t = re.sub(r"\$?\s?\d[\d.,]*\s*(mil|k|m)?", " ", t)
         t = re.sub(r"\b(pagu?e|pago|pagar|gast[oe]|compr[oea]|recib[ií]|compr\w+)\w*\b", " ", t)
         t = re.sub(r"\b(por|en|de|un|una|el|la|los|las|con|a|para|y|al|que|mil|medio|media|mitad)\b", " ", t)
-        t = re.sub(r"\b(nequi|daviplata|bancolombia|transferencia|efectivo|tarjeta|credito|debito|pse|nu|nubank|banco)\b", " ", t)
         t = re.sub(r"\b(pe[so]+)\b", " ", t)
         t = re.sub(r"\s+", " ", t).strip()
         frag = t.split()
@@ -696,43 +682,7 @@ class Motor:
         cand = " ".join(frag[:2])
         return cand[:40] if len(cand) >= 3 else None
 
-    def _validar(self, grupo, texto):
-        """Auditoria deterministica de tablas, sin LLM."""
-        t = (texto or "").lower()
-        # determina grupo objetivo
-        target = None
-        if "personal" in t:
-            target = "personal"
-        elif "hogar" in t:
-            target = "hogar"
-        elif "andrea" in t:
-            target = "andrea"
-        elif "todo" in t or "todas" in t:
-            target = None  # todos
-        else:
-            # por defecto audita el grupo donde se pidio
-            target = grupo
-        # si pide aprendizajes
-        if "aprendizaje" in t or "aprendizajes" in t:
-            try:
-                return [auditoria.auditar_aprendizajes()]
-            except Exception as e:
-                return [f"No pude auditar aprendizajes: {e}"]
-        # auditar tablas
-        try:
-            # if target is grupo, audita solo ese grupo, else todos
-            if target is None:
-                # todos
-                res = auditoria.auditar(self.srv, None)
-                # auditar(None) will do all, but we need to handle None case: our auditar expects grupo or None for all
-                # our auditar currently handles None as all
-                return [res]
-            else:
-                return [auditoria.auditar(self.srv, target)]
-        except Exception as e:
-            return [f"No pude auditar {target}: {e}"]
-
-    # ================== PRESUPUESTO    # ================== PRESUPUESTO ==================
+    # ================== PRESUPUESTO ==================
     def _presupuesto(self, grupo, texto):
         p = storage.get_presupuestos()
         t = normalize(texto or "")
@@ -806,20 +756,6 @@ class Motor:
         if not c:
             return ["🔎 No tengo inventario registrado."]
         return ["🛒 Productos más comprados:"] + ["  • %s: %d" % (p, n) for p, n in c.most_common(10)]
-
-
-    def _consulta(self, grupo, texto):
-        """Resumen deterministico por rango de fechas, sin LLM. Delega a reportes."""
-        try:
-            ini, fin = reportes.parse_rango(texto)
-        except Exception:
-            import datetime, calendar
-            from zoneinfo import ZoneInfo
-            now = datetime.datetime.now(ZoneInfo("America/Bogota"))
-            ini = datetime.date(now.year, now.month, 1)
-            fin = datetime.date(now.year, now.month, calendar.monthrange(now.year, now.month)[1])
-        sid = config.GROUPS[grupo][0]
-        return [reportes.resumen(self.srv, sid, grupo, ini, fin)]
 
     # ================== BORRAR (con confirmacion por sender) ===============
     def _borrar(self, grupo, sender, texto):

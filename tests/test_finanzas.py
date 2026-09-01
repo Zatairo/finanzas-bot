@@ -6,6 +6,7 @@ El registro usa checklist: tras pedir datos, se confirma con 'si'.
 """
 import datetime
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -68,6 +69,7 @@ class FakeSrv:
         self.append_calls = []       # evidencia de uso de append + INSERT_ROWS
         self.get_calls = 0           # lecturas masivas (no deben usarse para la fila)
         self.sin_updated_range = False
+        self.fallar_lecturas = False  # simula error transitorio de red al leer
 
     def spreadsheets(self):
         return FakeSpreadsheet(self)
@@ -83,6 +85,15 @@ class FakeSrv:
     def get(self, rng):
         with self.lock:
             self.get_calls += 1
+            if self.fallar_lecturas:
+                raise ConnectionError("red caida (simulado)")
+            m = re.match(r"Hoja 1!([A-Z]+)(\d+):([A-Z]+)(\d+)", rng or "")
+            if m and int(m.group(2)) == int(m.group(4)):
+                # lectura de UNA fila real (fila N de la hoja == rows[N-1])
+                li = int(m.group(2)) - 1
+                if 1 <= li < len(self.rows):
+                    return {"values": [list(self.rows[li])]}
+                return {"values": []}
             return {"values": [r[:] for r in self.rows[1:]]}
 
     def update(self, rng, row):
@@ -904,3 +915,232 @@ Becó413a-a7e5-4748-a572-
 d24daa543e3f
 
 Más información >"""
+
+
+# ==========================================================================
+# 20. PARTE A — Etiquetas G1/G2/G3 y rol de administración
+# ==========================================================================
+def test_ayuda_incluye_etiquetas_g1_g2_g3(motor):
+    m, _srv = motor
+    s = _unpack(m.procesar("personal", "3002084572", "ayuda"))
+    assert "Finanzas personales" in s and "G1" in s, s
+    assert "Finanzas del hogar" in s and "G2" in s, s
+    assert "Administración privada" in s and "G3" in s, s
+    assert "NO registra transacciones" in s, s
+
+
+def test_claves_grupos_siguen_siendo_internas(motor):
+    assert set(config.GROUPS) == {"personal", "hogar", "andrea"}
+    for k in config.GROUPS:
+        assert k in config.GROUP_LABELS, k
+
+
+def test_registro_personal_etiqueta_g1(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "personal", "3002084572",
+                                          "pagué 5000 mercado")
+    assert "G1" in rfinal, rfinal
+    assert "Finanzas personales" in rfinal, rfinal
+    assert "✅ Registrado" in rfinal
+
+
+def test_registro_hogar_etiqueta_g2(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "hogar", "3002084572",
+                                          "compramos 80 mil de mercado a medias")
+    assert "G2" in rfinal, rfinal
+    assert "Finanzas del hogar" in rfinal, rfinal
+
+
+def test_registro_andrea_sin_codigo_g(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "andrea", "3147359270",
+                                          "pagué 5000 mercado")
+    assert "Finanzas de Andrea" in rfinal, rfinal
+    assert "G1" not in rfinal, rfinal
+    assert "G2" not in rfinal, rfinal
+
+
+def test_admin_revisar_encabezado_g3(motor):
+    m, _srv = motor
+    r = m.procesar("personal", "3002084572", "revisar")
+    assert _unpack(r).startswith("🔐 Administración privada (G3)")
+
+
+def test_admin_aprender_encabezado_g3(motor):
+    m, _srv = motor
+    r = m.procesar("personal", "3002084572", "farmacity = medicamentos")
+    s = _unpack(r)
+    assert s.startswith("🔐 Administración privada (G3)"), s
+    assert "Aprendí" in s, s
+    ap = storage.get_aprendizajes()
+    assert ap.get("farmacity") and ap.get("farmacity")["categoria"] == "Salud"
+
+
+def test_no_admin_sigue_bloqueado(motor):
+    m, _srv = motor
+    for cmd in ("revisar", "farmacity = medicamentos"):
+        s = _unpack(m.procesar("hogar", "3147359270", cmd))
+        assert "administrador" in s, (cmd, s)
+
+
+def test_cli_grupo_solo_personal_hogar_andrea(motor):
+    import subprocess
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+    env = dict(os.environ, FINANZAS_DATA_DIR=config.DATA_DIR)
+    for bad in ("G1", "g1", "admin"):
+        r = subprocess.run([sys.executable, os.path.join(base, "gasto.py"),
+                            "--grupo", bad, "--texto", "pague 5000", "--dry-run"],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode != 0, bad
+        assert "invalid choice" in r.stderr, (bad, r.stderr)
+    for good in ("personal", "hogar", "andrea"):
+        r = subprocess.run([sys.executable, os.path.join(base, "gasto.py"),
+                            "--grupo", good, "--texto", "pague 5000 mercado",
+                            "--dry-run"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, (good, r.stderr)
+
+
+# ==========================================================================
+# 21. PARTE B — OCR dígito antepuesto
+# ==========================================================================
+def test_analizar_monto_digito_antepuesto_ambiguo():
+    """$57.500 (fuerte) + 7.500 (etiqueta): el $ NO permite autoconfiar el largo."""
+    a = analizar_monto("Monto $57.500\nMonto 7.500")
+    assert a["confianza"] == "ambiguo", a
+    assert a["monto"] is None, a
+    assert a["motivo"] == "digito_antepuesto", a
+    vals = {c["valor"] for c in a["candidatos"]}
+    assert vals == {7500, 57500}, a
+
+
+def test_analizar_monto_digito_antepuesto_52800_vs_2800():
+    a = analizar_monto("Monto 52.800\nMonto 2.800")
+    assert a["confianza"] == "ambiguo", a
+    assert a["monto"] is None, a
+    vals = {c["valor"] for c in a["candidatos"]}
+    assert vals == {52800, 2800}, a
+
+
+def test_analizar_monto_unico_sin_ambiguedad_se_mantiene():
+    """Caso normal: candidato único de recibo no se ve afectado."""
+    a = analizar_monto("Monto total $50.000,00\nMonto $50.000,00")
+    assert a["confianza"] == "alta" and a["monto"] == 50000, a
+
+
+def test_foto_digito_antepuesto_pide_monto(motor):
+    m, srv = motor
+    r = m.procesar("personal", "3002084572",
+                   "Monto $57.500\nMonto 7.500",
+                   imagen="/tmp/r.jpg", evidencia="r.jpg", dry_run=True)
+    s = _unpack(r)
+    assert "No identifiqué con certeza" in s, s
+    assert '"decision": "pedir_monto"' in s, s
+    assert '"confianza_monto": "ambiguo"' in s, s
+    assert len(srv.rows) == 1
+
+
+def test_ocr_inestable_doble_pasada_pide_monto(motor):
+    """Las dos pasadas de OCR no coinciden -> no autoconfiar (caso real 52.800)."""
+    m, srv = motor
+    r = m.procesar("personal", "3002084572",
+                   "Monto total 52.800,00\nMonto 52.800,00",
+                   imagen="/tmp/recibo.jpg", evidencia="recibo.jpg", dry_run=True,
+                   ocr_text="Monto total 52.800,00\nMonto 52.800,00",
+                   ocr_inestable=True)
+    s = _unpack(r)
+    assert "inconsistente" in s, s
+    assert '"decision": "pedir_monto"' in s, s
+    assert len(srv.rows) == 1
+
+
+# ==========================================================================
+# 22. PARTE B — Checklist con monto de foto, trazabilidad y ruta idempotente
+# ==========================================================================
+def test_checklist_foto_muestra_monto_leido(motor):
+    m, _srv = motor
+    caption = "Pago de camiseta oversize hominidx, categoría ropa"
+    ocr = "Monto total $50.000,00\n07 AGO 2026 - 05:59:08\nCamiseta oversize"
+    r1 = _unpack(m.procesar("personal", "3002084572", caption + "\n" + ocr,
+                            imagen="/tmp/recibo.jpg", evidencia="recibo.jpg",
+                            caption=caption, ocr_text=ocr))
+    assert "Confirma el registro" in r1, r1
+    assert ("Monto leído de la foto: $50,000. Si no coincide, "
+            "corrígelo con la opción 1.") in r1, r1
+
+
+def _ultimo_historial_evento():
+    import json as _json
+    p = os.path.join(config.DATA_DIR, "historial.jsonl")
+    with open(p, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    return _json.loads(lines[-1])
+
+
+def test_historial_guarda_updatedrange_fila_hoja(motor):
+    m, srv = motor
+    _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    ev = _ultimo_historial_evento()
+    assert ev["tipo"] == "registro", ev
+    assert ev["data"]["updatedRange"] == "Hoja 1!A2:P2", ev
+    assert ev["data"]["fila"] == 2, ev
+    assert ev["data"]["hoja_id"] == config.GROUPS["personal"][0], ev
+
+
+def test_idempotente_fila_coincide_ya_registrado(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "✅ Registrado" in rfinal
+    op_key = list(storage.get_ledger().data.keys())[0]
+    n_filas = len(srv.rows)
+    hist1 = _historial_lines()
+    _a, r2 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "Ya estaba registrado" in r2, r2
+    assert len(srv.rows) == n_filas
+    assert _historial_lines() == hist1   # sin evento de pérdida ni reescritura
+    # el ledger conserva solo la entrada original, sin reinsertado R1
+    assert set(storage.get_ledger().data) == {op_key}, storage.get_ledger().data
+
+
+def test_idempotente_fila_borrada_reinserta_r1(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "✅ Registrado" in rfinal
+    op_key = list(storage.get_ledger().data.keys())[0]
+    row_id = storage.get_ledger().data[op_key]["id"]
+    fila_esperada = storage.get_ledger().data[op_key]["fila"]
+    # reimportación externa: la fila desaparece de la hoja
+    srv.rows = [srv.rows[0]]
+    hist1 = _historial_lines()
+    _a, r2 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "fue borrada o sobrescrita externamente" in r2, r2
+    assert row_id + "-R1" in r2, r2
+    assert len(srv.rows) == 2                       # reinsertada
+    assert srv.rows[-1][0] == row_id + "-R1", srv.rows[-1]
+    # evento de pérdida en historial con id, fila esperada y hoja
+    assert _historial_lines() == hist1 + 1
+    ev = _ultimo_historial_evento()
+    assert ev["tipo"] == "fila_perdida_externamente", ev
+    assert ev["data"]["id"] == row_id, ev
+    assert ev["data"]["fila"] == fila_esperada, ev
+    assert ev["data"]["hoja"] == config.GROUPS["personal"][0], ev
+    # el ledger registra el nuevo id derivado (reintento no reinserta de nuevo)
+    assert storage.get_ledger().claim(op_key + "-R1") == row_id + "-R1"
+
+
+def test_idempotente_error_transitorio_no_reinserta(motor):
+    m, srv = motor
+    _r1, rfinal = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "✅ Registrado" in rfinal
+    op_key = list(storage.get_ledger().data.keys())[0]
+    n_filas = len(srv.rows)
+    srv.fallar_lecturas = True
+    _a, r2 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "error transitorio" in r2, r2
+    assert len(srv.rows) == n_filas              # no reinsertó
+    assert storage.get_ledger().claim(op_key + "-R1") is None  # no tocó ledger
+    srv.fallar_lecturas = False
+    # al recuperarse la red, la fila sigue ahí -> ya registrado, sin duplicar
+    _a, r3 = _registrar_y_confirmar(m, "personal", "3002084572", "pagué 5000 mercado")
+    assert "Ya estaba registrado" in r3, r3
+    assert len(srv.rows) == n_filas

@@ -110,6 +110,26 @@ def _candidatos_linea(linea):
     return res
 
 
+def _patron_digito_antepuesto(cands):
+    """True si hay dos candidatos donde uno es el sufijo o prefijo exacto del
+    otro (patrón de dígito antepuesto/pospuesto del OCR): 57500 vs 7500,
+    52800 vs 2800. Con eso NO se autoconfía el más largo."""
+    vals = sorted({c["valor"] for c in cands})
+    for i in range(len(vals)):
+        a = str(vals[i])
+        if len(a) < 3:
+            continue
+        for j in range(len(vals)):
+            if i == j:
+                continue
+            b = str(vals[j])
+            if len(b) < 3:
+                continue
+            if len(b) > len(a) and (b.endswith(a) or b.startswith(a)):
+                return True
+    return False
+
+
 def analizar_monto(texto):
     """Analiza montos con contexto por número. Devuelve dict:
         monto: int|None
@@ -157,10 +177,18 @@ def analizar_monto(texto):
         unicos = sorted({c["valor"] for c in sel})
         publicos = [{"valor": c["valor"], "linea": c["linea"]} for c in cands]
         if len(unicos) == 1:
+            # dígito antepuesto/pospuesto (57500 vs 7500): no autoconfiar el
+            # más largo aunque esté en un nivel de evidencia superior.
+            if _patron_digito_antepuesto(cands):
+                return {"monto": None, "confianza": "ambiguo",
+                        "candidatos": publicos, "motivo": "digito_antepuesto"}
             return {"monto": unicos[0],
                     "confianza": {4: "alta", 3: "media", 2: "baja"}[fuerza],
                     "candidatos": publicos,
                     "motivo": "unico_" + {4: "fuerte", 3: "etiqueta", 2: "plano"}[fuerza]}
+        if _patron_digito_antepuesto(cands):
+            return {"monto": None, "confianza": "ambiguo",
+                    "candidatos": publicos, "motivo": "digito_antepuesto"}
         return {"monto": None, "confianza": "ambiguo",
                 "candidatos": publicos, "motivo": "multiples_candidatos"}
     return {"monto": None, "confianza": "ninguno",

@@ -116,7 +116,7 @@ class Motor:
         if re.match(r"^[a-z0-9_ ]{3,}\s*=\s*.+", t):
             return ("aprender", t)
         # FIX: priorizar registro si parece gasto (incluye donación) aunque contenga fecha
-        _parece_gasto = bool(re.search(r"\b(pagu?e|gasto|compre|internet|arepas|mercado|pago|abono|tigo|claro|netflix|spotify|arriendo|gasolina|domicilio|arepa|donaci[óo]n|donacion)\b", t))
+        _parece_gasto = bool(re.search(r"\b(pagu?e|gasto|compre|internet|arepas|mercado|pago|abono|tigo|claro|netflix|spotify|arriendo|gasolina|domicilio|arepa|donaci[óo]n|donacion|donaciones)\b", t))
         _es_pregunta_resumen = bool(re.search(r"^\s*(resumen|muestr|cuanto|cuánto|balance|total|gastos de|resumen de)\b", t))
         if _parece_gasto and not _es_pregunta_resumen:
             return ("registro", None)
